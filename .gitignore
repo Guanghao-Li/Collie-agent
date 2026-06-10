@@ -1,7 +1,10 @@
 # Local configuration and runtime state
 .env
-config.toml
-config.local.toml
+.env.*
+!.env.example
+config*.toml
+!config.example.toml
+configs/
 workspace/
 
 # Python caches and test output

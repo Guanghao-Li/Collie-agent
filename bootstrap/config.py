@@ -75,6 +75,11 @@ class MemoryConfig:
     auto_extract: bool = True
     auto_consolidate: bool = True
     enable_hyde: bool = True
+    enable_vector_memory: bool = False
+    vector_db_path: str = "memory/vector_memory.db"
+    embedding_model: str = ""
+    vector_score_threshold: float = 0.7
+    vector_top_k: int = 8
     max_recent_messages: int = 30
     search_limit: int = 8
     workspace_dir: str = "memory"
