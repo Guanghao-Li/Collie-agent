@@ -1,0 +1,81 @@
+# Collie-agent 单文件配置示例。
+# 运行 `python main.py init` 后，这份文件会被复制成 config.toml。
+#
+# 建议流程：
+# 1. 先保持 llm.provider = "echo"，确认程序和 Discord 配置能跑通。
+# 2. 需要真实大模型时，再把 llm.provider 改成 "openai-compatible"。
+# 3. 换不同厂商时，只要它兼容 OpenAI Chat Completions，就改 LLM_MODEL / LLM_BASE_URL / LLM_API_KEY。
+# 4. Discord token 和 API key 建议放在环境变量里，不要直接提交到代码仓库。
+
+[app]
+name = "Collie-agent"
+timezone = "America/New_York"
+
+[discord]
+enabled = true
+bot_token = "${DISCORD_BOT_TOKEN}"
+guild_id = "${DISCORD_GUILD_ID}"
+
+# 留空表示不限制频道或用户。长期使用时建议填上你的频道 ID 和用户 ID。
+# 示例：allowed_channel_ids = ["123456789012345678"]
+# 示例：allowed_user_ids = ["123456789012345678"]
+allowed_channel_ids = []
+allowed_user_ids = []
+
+# 主动推送默认发送到哪个频道。不开主动推送也可以先留空。
+default_push_channel_id = "${DISCORD_DEFAULT_PUSH_CHANNEL_ID}"
+
+[llm]
+# echo 不联网、不花钱，适合本地测试。接真实模型时改成 "openai-compatible"。
+provider = "echo"
+
+[llm.compatible]
+# provider = "openai-compatible" 时才会使用这里。
+# 适用于 DeepSeek、通义千问、Moonshot、智谱、OpenRouter 等兼容 /chat/completions 的服务。
+# 具体 model 和 base_url 以你使用的厂商文档为准。
+model = "${LLM_MODEL}"
+api_key = "${LLM_API_KEY}"
+base_url = "${LLM_BASE_URL}"
+timeout_seconds = 30
+temperature = 0.7
+
+[llm.fast]
+# 可选轻量模型。默认关闭；关闭时内部轻量任务会复用主模型。
+enabled = false
+model = ""
+api_key = "${FAST_LLM_API_KEY}"
+base_url = ""
+timeout_seconds = 15
+temperature = 0.0
+fallback_to_main = true
+
+[memory]
+enabled = true
+auto_extract = true
+auto_consolidate = true
+enable_hyde = true
+max_recent_messages = 30
+search_limit = 8
+workspace_dir = "memory"
+
+[proactive]
+enabled = true
+interval_seconds = 900
+quiet_hours_start = "23:00"
+quiet_hours_end = "08:00"
+min_score_to_push = 0.72
+max_pushes_per_day = 6
+fast_prefilter_enabled = true
+fast_prefilter_min_score = 0.4
+
+[drift]
+enabled = true
+interval_seconds = 1800
+run_only_when_idle = true
+idle_after_seconds = 600
+max_tasks_per_cycle = 2
+
+[plugins]
+enabled = true
+paths = ["plugins_builtin"]
+strict_plugins = false

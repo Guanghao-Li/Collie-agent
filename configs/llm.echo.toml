@@ -1,0 +1,23 @@
+# 进阶拆分配置示例。
+# 默认优先使用根目录的 config.example.toml；这里保留给需要 extends 的场景。
+# 本地测试用 LLM 配置。
+# echo provider 不调用任何外部 API，适合开发、测试和离线演示。
+
+[llm]
+provider = "echo"
+
+[llm.compatible]
+model = "${LLM_MODEL}"
+api_key = "${LLM_API_KEY}"
+base_url = "${LLM_BASE_URL}"
+timeout_seconds = 30
+temperature = 0.7
+
+[llm.fast]
+enabled = false
+model = ""
+api_key = ""
+base_url = ""
+timeout_seconds = 15
+temperature = 0.0
+fallback_to_main = true

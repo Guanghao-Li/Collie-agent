@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import json
+import logging
+
+from agent.llm import LLMProvider
+from bootstrap.config import MemoryConfig
+from memory.consolidator import MemoryConsolidator
+from memory.extractor import MemoryExtractor
+from memory.models import (
+    ConsolidationResult,
+    MemoryGateDecision,
+    MemoryItem,
+    MemorySearchResult,
+    MemorySearchTrace,
+)
+from memory.search import MemorySearch
+from memory.store import MemoryStore
+from session.models import SessionMessage
+
+
+class MemoryRuntime:
+    def __init__(
+        self,
+        workspace: str | Path,
+        config: MemoryConfig,
+        llm_provider: LLMProvider | None = None,
+        fast_llm_provider: LLMProvider | None = None,
+    ) -> None:
+        self.workspace = Path(workspace)
+        self.config = config
+        self.main_llm_provider = llm_provider
+        self.fast_llm_provider = fast_llm_provider or llm_provider
+        self.store = MemoryStore(self.workspace / config.workspace_dir)
+        self.search_engine = MemorySearch()
+        self.extractor = MemoryExtractor(
+            main_llm_provider=llm_provider,
+            fast_llm_provider=self.fast_llm_provider,
+        )
+        self.consolidator = MemoryConsolidator(
+            self.store,
+            main_llm_provider=llm_provider,
+            fast_llm_provider=self.fast_llm_provider,
+        )
+        self.last_search_trace: MemorySearchTrace | None = None
+        self._logger = logging.getLogger(__name__)
+
+    async def initialize(self) -> None:
+        await self.store.initialize()
+
+    async def read_core_memory(self) -> str:
+        return self.store.read_text(self.store.memory_md)
+
+    async def read_profile(self) -> str:
+        return self.store.read_text(self.store.profile_md)
+
+    async def read_recent_context(self) -> str:
+        return self.store.read_text(self.store.recent_context_md)
+
+    async def append_pending_memory(self, item: MemoryItem) -> None:
+        item.status = "pending"
+        item.updated_at = datetime.now(timezone.utc)
+        self.store.append_pending(item)
+
+    async def add_memory(self, item: MemoryItem) -> None:
+        item.status = "active"
+        item.updated_at = datetime.now(timezone.utc)
+        items = self.store.read_index()
+        items = [existing for existing in items if existing.id != item.id]
+        items.append(item)
+        self.store.write_index(items)
+        self.consolidator._render_memory_files(items)
+
+    async def delete_memory(self, memory_id: str, reason: str) -> None:
+        items = self.store.read_index()
+        now = datetime.now(timezone.utc)
+        for item in items:
+            if item.id == memory_id:
+                item.status = "deleted"
+                item.updated_at = now
+                self.store.append_deleted(item, reason)
+                break
+        self.store.write_index(items)
+        self.consolidator._render_memory_files(items)
+
+    async def search(self, query: str, limit: int = 8) -> list[MemoryItem]:
+        items = self.store.read_index()
+        results = self.search_engine.search(items, query, limit)
+        if results:
+            now = datetime.now(timezone.utc)
+            result_ids = {item.id for item in results}
+            for item in items:
+                if item.id in result_ids:
+                    item.last_used_at = now
+            self.store.write_index(items)
+        return results
+
+    async def should_search_memory(
+        self,
+        user_message: str,
+        recent_messages: list[SessionMessage] | None = None,
+    ) -> MemoryGateDecision:
+        provider = self.fast_llm_provider
+        if provider is None or getattr(provider, "name", "") == "echo":
+            return self._rule_based_gate(user_message)
+
+        prompt = (
+            "请判断是否需要检索长期记忆。只返回 JSON，不要解释。\n"
+            "JSON 字段：should_search(bool), reason(str), query_type(str), "
+            "suggested_query(str|null), memory_types(list[str])。\n"
+            "query_type 可选：none, factual, preference, project, recent_context, "
+            "relationship, instruction, broad。\n\n"
+            f"用户消息：{user_message}\n"
+            f"最近对话：{self._render_recent_messages(recent_messages or [])}"
+        )
+        try:
+            response = await provider.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                timeout_seconds=10,
+                purpose="memory_gate",
+            )
+            data: dict[str, Any] = json.loads(response)
+            return MemoryGateDecision(
+                should_search=bool(data.get("should_search", True)),
+                reason=str(data.get("reason", "fast_model")),
+                query_type=str(data.get("query_type", "broad")),
+                suggested_query=(
+                    str(data["suggested_query"]) if data.get("suggested_query") else None
+                ),
+                memory_types=[str(item) for item in data.get("memory_types", [])],
+            )
+        except Exception:
+            self._logger.warning("memory gate 解析失败，fallback 为检索记忆。", exc_info=True)
+            return MemoryGateDecision(
+                should_search=True,
+                reason="fallback_on_parse_error",
+                query_type="broad",
+                suggested_query=user_message,
+                memory_types=[],
+            )
+
+    async def rewrite_memory_query(
+        self,
+        user_message: str,
+        recent_messages: list[SessionMessage] | None = None,
+        gate: MemoryGateDecision | None = None,
+    ) -> str:
+        if gate and gate.suggested_query:
+            return gate.suggested_query
+        provider = self.fast_llm_provider
+        if provider is None or getattr(provider, "name", "") == "echo":
+            recent = " ".join(message.content for message in (recent_messages or [])[-2:])
+            return f"{recent} {user_message}".strip() or user_message
+        prompt = (
+            "请把用户消息改写成适合搜索长期记忆的一行查询。"
+            "只输出改写后的查询，不要输出解释。\n\n"
+            f"用户消息：{user_message}\n"
+            f"最近对话：{self._render_recent_messages(recent_messages or [])}"
+        )
+        try:
+            response = await provider.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                timeout_seconds=10,
+                purpose="memory_query_rewrite",
+            )
+            return response.strip().splitlines()[0] or user_message
+        except Exception:
+            self._logger.warning("memory query rewrite 失败，使用原始查询。", exc_info=True)
+            return user_message
+
+    async def generate_hyde_document(
+        self,
+        query: str,
+        recent_messages: list[SessionMessage] | None = None,
+    ) -> str | None:
+        if not self.config.enable_hyde:
+            return None
+        provider = self.fast_llm_provider
+        if provider is None or getattr(provider, "name", "") == "echo":
+            return None
+        prompt = (
+            "请基于查询生成 3-6 句话的假想相关记忆/假想答案，用于增强检索。"
+            "不要回答用户，不要输出标题，只输出检索增强文本。\n\n"
+            f"查询：{query}\n"
+            f"最近对话：{self._render_recent_messages(recent_messages or [])}"
+        )
+        try:
+            response = await provider.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                timeout_seconds=10,
+                purpose="memory_hyde",
+            )
+            return response.strip() or None
+        except Exception:
+            self._logger.warning("HyDE 生成失败，跳过 HyDE。", exc_info=True)
+            return None
+
+    async def search_with_trace(
+        self,
+        user_message: str,
+        recent_messages: list[SessionMessage] | None = None,
+        limit: int | None = None,
+    ) -> MemorySearchResult:
+        gate = await self.should_search_memory(user_message, recent_messages or [])
+        rewritten_query: str | None = None
+        hyde_document: str | None = None
+        memories: list[MemoryItem] = []
+        if gate.should_search:
+            rewritten_query = await self.rewrite_memory_query(
+                user_message,
+                recent_messages or [],
+                gate,
+            )
+            hyde_document = await self.generate_hyde_document(
+                rewritten_query,
+                recent_messages or [],
+            )
+            combined_query = (
+                f"{rewritten_query}\n{hyde_document}" if hyde_document else rewritten_query
+            )
+            memories = await self.search(combined_query, limit or self.config.search_limit)
+        trace = MemorySearchTrace(
+            gate_decision=gate,
+            original_query=user_message,
+            rewritten_query=rewritten_query,
+            hyde_document=hyde_document,
+            used_fast_model=self.fast_llm_provider is not None,
+            fast_model_name=getattr(self.fast_llm_provider, "model", None)
+            or getattr(self.fast_llm_provider, "name", None),
+            selected_memory_ids=[item.id for item in memories],
+        )
+        self.last_search_trace = trace
+        return MemorySearchResult(memories=memories, trace=trace)
+
+    async def extract_from_turn(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> list[MemoryItem]:
+        if not self.config.enabled or not self.config.auto_extract:
+            return []
+        recent_context = await self.read_recent_context()
+        items = await self.extractor.extract(
+            session_id=session_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            recent_context=recent_context,
+        )
+        for item in items:
+            await self.append_pending_memory(item)
+        return items
+
+    async def consolidate(self) -> ConsolidationResult:
+        return await self.consolidator.consolidate()
+
+    async def update_recent_context(self, summary: str) -> None:
+        self.store.write_text(
+            self.store.recent_context_md,
+            "# 近期上下文\n\n" + summary.strip() + "\n",
+        )
+
+    async def append_reflection(self, summary: str) -> None:
+        self.store.append_text(
+            self.store.reflections_md,
+            f"\n## {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n{summary.strip()}\n",
+        )
+
+    async def build_memory_context(
+        self,
+        query: str,
+        recent_messages: list[SessionMessage] | None = None,
+    ) -> str:
+        profile = await self.read_profile()
+        recent_context = await self.read_recent_context()
+        search_result = await self.search_with_trace(
+            query,
+            recent_messages or [],
+            self.config.search_limit,
+        )
+        results = search_result.memories
+        lines = [profile.strip(), recent_context.strip()]
+        if results:
+            lines.append("相关索引记忆：")
+            lines.extend(f"- {item.text}" for item in results)
+        return "\n\n".join(line for line in lines if line)
+
+    async def stats(self) -> dict[str, int]:
+        index = self.store.read_index()
+        pending = self.store.read_pending()
+        return {
+            "active": sum(1 for item in index if item.status == "active"),
+            "pending": len(pending),
+            "deleted": sum(1 for item in index if item.status == "deleted"),
+        }
+
+    def _rule_based_gate(self, user_message: str) -> MemoryGateDecision:
+        normalized = user_message.strip().lower()
+        short_no_search = {
+            "好",
+            "好的",
+            "谢谢",
+            "继续",
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+            "yes",
+            "no",
+        }
+        if normalized in short_no_search or len(normalized) <= 2:
+            return MemoryGateDecision(
+                should_search=False,
+                reason="short_acknowledgement",
+                query_type="none",
+            )
+        search_keywords = [
+            "之前",
+            "记得",
+            "我说过",
+            "上次",
+            "偏好",
+            "喜欢",
+            "项目",
+            "目标",
+            "记忆",
+            "remember",
+            "before",
+            "preference",
+            "project",
+            "goal",
+        ]
+        if any(keyword in normalized for keyword in search_keywords):
+            return MemoryGateDecision(
+                should_search=True,
+                reason="keyword_hit",
+                query_type="broad",
+                suggested_query=user_message,
+            )
+        return MemoryGateDecision(
+            should_search=True,
+            reason="default_search",
+            query_type="broad",
+            suggested_query=user_message,
+        )
+
+    def _render_recent_messages(self, recent_messages: list[SessionMessage]) -> str:
+        if not recent_messages:
+            return "无"
+        return "\n".join(
+            f"{message.role}: {message.content}" for message in recent_messages[-6:]
+        )

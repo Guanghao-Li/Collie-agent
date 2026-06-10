@@ -1,0 +1,23 @@
+# 进阶拆分配置示例。
+# 默认优先使用根目录的 config.example.toml；这里保留给需要 extends 的场景。
+# OpenAI 兼容接口配置模板。
+# 适用于支持 /chat/completions 的厂商；具体 model 和 base_url 以厂商文档为准。
+
+[llm]
+provider = "openai-compatible"
+
+[llm.compatible]
+model = "${LLM_MODEL}"
+api_key = "${LLM_API_KEY}"
+base_url = "${LLM_BASE_URL}"
+timeout_seconds = 30
+temperature = 0.7
+
+[llm.fast]
+enabled = false
+model = ""
+api_key = "${FAST_LLM_API_KEY}"
+base_url = ""
+timeout_seconds = 15
+temperature = 0.0
+fallback_to_main = true

@@ -1,0 +1,5 @@
+# 旧模板兼容入口。
+# 新配置建议使用 configs/llm.compatible.example.toml。
+
+[config]
+extends = ["llm.compatible.example.toml"]
