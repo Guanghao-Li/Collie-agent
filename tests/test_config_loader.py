@@ -79,6 +79,52 @@ model = "legacy-model"
     assert config.llm.openai.model == "legacy-model"
 
 
+def test_dotenv_values_are_loaded_from_config_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    config_file = tmp_path / "config.toml"
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("LLM_API_KEY=dotenv-secret\n", encoding="utf-8")
+    config_file.write_text(
+        """
+[llm]
+provider = "openai-compatible"
+
+[llm.compatible]
+api_key = "${LLM_API_KEY}"
+base_url = "https://example.com/v1"
+model = "example-model"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.llm.compatible.api_key == "dotenv-secret"
+
+
+def test_dotenv_does_not_override_existing_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "real-env-secret")
+    config_file = tmp_path / "config.toml"
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("LLM_API_KEY=dotenv-secret\n", encoding="utf-8")
+    config_file.write_text(
+        """
+[llm]
+provider = "openai-compatible"
+
+[llm.compatible]
+api_key = "${LLM_API_KEY}"
+base_url = "https://example.com/v1"
+model = "example-model"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.llm.compatible.api_key == "real-env-secret"
+
+
 def test_missing_fast_llm_config_defaults_to_disabled(tmp_path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(

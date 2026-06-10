@@ -1,4 +1,5 @@
 # Local configuration and runtime state
+.env
 config.toml
 config.local.toml
 workspace/

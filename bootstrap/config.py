@@ -119,6 +119,31 @@ class Settings:
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
 
 
+def _strip_env_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        os.environ.setdefault(key, _strip_env_quotes(value))
+
+
 def _as_str_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -189,8 +214,11 @@ def _load_toml_with_extends(path: Path, seen: set[Path] | None = None) -> dict[s
 def load_config(path: str | Path | None) -> Settings:
     settings = Settings()
     if path is None:
+        _load_dotenv(Path(".env"))
         return settings
     config_path = Path(path)
+    dotenv_path = config_path.parent / ".env"
+    _load_dotenv(dotenv_path)
     if not config_path.exists():
         return settings
     data = _load_toml_with_extends(config_path)
