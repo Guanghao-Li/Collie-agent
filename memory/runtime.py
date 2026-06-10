@@ -52,6 +52,7 @@ class MemoryRuntime:
             main_llm_provider=llm_provider,
             fast_llm_provider=self.fast_llm_provider,
             markdown_store=self.engine.markdown_store,  # type: ignore[attr-defined]
+            config=config,
         )
         self.last_search_trace: MemorySearchTrace | None = None
         self._logger = logging.getLogger(__name__)
@@ -249,13 +250,21 @@ class MemoryRuntime:
             assistant_message=assistant_message,
             recent_context=recent_context,
         )
+        if self.config.consolidation_mode != "aka_like":
+            items = [
+                item
+                for item in items
+                if item.metadata.get("extraction_kind") != "history_entry"
+                and "history_entry" not in item.tags
+            ]
         for item in items:
             await self.append_pending_memory(item)
         return items
 
     async def consolidate(self) -> ConsolidationResult:
         result = await self.consolidator.consolidate()
-        await self.engine.mutate(MemoryMutation(kind="sync"))
+        if self.config.consolidation_mode != "aka_like":
+            await self.engine.mutate(MemoryMutation(kind="sync"))
         return result
 
     async def update_recent_context(self, summary: str) -> None:

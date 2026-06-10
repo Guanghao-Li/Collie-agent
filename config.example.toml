@@ -53,6 +53,9 @@ fallback_to_main = true
 enabled = true
 auto_extract = true
 auto_consolidate = true
+# legacy keeps the existing pending -> active -> MEMORY.md flow.
+# aka_like writes HISTORY.md / PENDING.md / RECENT_CONTEXT.md and leaves MEMORY.md for a future optimizer.
+consolidation_mode = "legacy"
 enable_hyde = true
 max_recent_messages = 30
 search_limit = 8

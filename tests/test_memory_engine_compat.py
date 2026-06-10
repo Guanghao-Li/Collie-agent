@@ -161,3 +161,79 @@ async def test_vector_flag_without_backend_falls_back_to_keyword_search(tmp_path
     assert result.metadata["vector_enabled"] is False
     assert description["vector_memory"]["enabled"] is False
     assert description["vector_memory"]["requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_query_intent_maps_to_legacy_kinds(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    await runtime.add_memory(
+        MemoryItem(
+            type="preference",
+            text="User prefers detailed code explanations",
+            tags=["style"],
+            source="test",
+        )
+    )
+
+    legacy = await runtime.engine.query(
+        MemoryQuery(kind="search", text="detailed code", limit=3)
+    )
+    answer = await runtime.engine.query(
+        MemoryQuery(intent="answer", text="detailed code", limit=3)
+    )
+    context = await runtime.engine.query(
+        MemoryQuery(intent="context", text="detailed code", limit=3)
+    )
+
+    assert legacy.items
+    assert answer.items
+    assert answer.records
+    assert answer.metadata["intent"] == "answer"
+    assert "User prefers detailed code explanations" in context.content
+    assert context.text_block == context.content
+
+
+@pytest.mark.asyncio
+async def test_memory_mutation_accepts_new_remember_and_forget_shapes(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+
+    remember = await runtime.engine.mutate(
+        MemoryMutation(
+            kind="remember",
+            summary="User wants code explanations to include examples",
+            memory_kind="preference",
+            source_ref="turn:123",
+            stable=True,
+        )
+    )
+
+    assert remember.ok is True
+    assert remember.accepted is True
+    assert remember.item_id
+    assert remember.actual_kind == "preference"
+
+    forget = await runtime.engine.mutate(
+        MemoryMutation(kind="forget", ids=(remember.item_id,), reason="test")
+    )
+
+    assert forget.ok is True
+    assert forget.accepted is True
+    assert forget.affected_ids == [remember.item_id]
+
+
+@pytest.mark.asyncio
+async def test_memory_query_timeline_reads_history(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    runtime.engine.markdown_store.append_history_entry(  # type: ignore[attr-defined]
+        "用户开始整理 Collie-agent 记忆系统。",
+        source_ref="turn:history",
+    )
+
+    result = await runtime.engine.query(MemoryQuery(intent="timeline", text="Collie-agent"))
+
+    assert "用户开始整理 Collie-agent 记忆系统。" in result.content
+    assert result.records
+    assert result.metadata["intent"] == "timeline"

@@ -157,3 +157,42 @@ async def test_memory_extractor_returns_empty_when_all_providers_fail() -> None:
     )
 
     assert await extractor.extract("s1", "请记住 x", "好的") == []
+
+
+@pytest.mark.asyncio
+async def test_rule_extractor_outputs_requested_memory_or_preference() -> None:
+    extractor = MemoryExtractor()
+
+    batch = await extractor.extract_batch(
+        "s1",
+        "记住，我以后希望你解释代码时讲得详细一点。",
+        "好的。",
+    )
+
+    assert batch.pending_items
+    assert batch.pending_items[0].tag in {"preference", "requested_memory"}
+    assert "详细" in batch.pending_items[0].content
+
+
+@pytest.mark.asyncio
+async def test_rule_extractor_drops_temporary_tasks() -> None:
+    extractor = MemoryExtractor()
+
+    batch = await extractor.extract_batch("s1", "今天帮我查一下天气。", "好的。")
+
+    assert batch.pending_items == []
+    assert batch.history_entries == []
+
+
+@pytest.mark.asyncio
+async def test_rule_extractor_marks_corrections_or_procedures() -> None:
+    extractor = MemoryExtractor()
+
+    batch = await extractor.extract_batch(
+        "s1",
+        "刚才那个流程不对，以后不要再那样做。",
+        "明白。",
+    )
+
+    assert batch.pending_items
+    assert batch.pending_items[0].tag in {"correction", "procedure"}
