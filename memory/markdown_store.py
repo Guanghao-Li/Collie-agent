@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ class MarkdownMemoryStore:
         self.index_json = self.memory_dir / "MEMORY_INDEX.json"
         self.reflections_md = self.memory_dir / "REFLECTIONS.md"
         self.consolidation_log_md = self.memory_dir / "CONSOLIDATION_LOG.md"
+        self.optimization_log_md = self.memory_dir / "OPTIMIZATION_LOG.md"
         self.consolidation_writes_json = self.memory_dir / "consolidation_writes.json"
         self.deleted_jsonl = self.memory_dir / "deleted_memories.jsonl"
 
@@ -61,6 +63,7 @@ class MarkdownMemoryStore:
             self.history_md: "# History\n\n<!-- Timeline events appended by consolidation. -->\n\n",
             self.pending_md: self._pending_header(),
             self.consolidation_log_md: "# Consolidation Log\n\n",
+            self.optimization_log_md: "# Optimization Log\n\n",
             self.consolidation_writes_json: json.dumps({"sources": {}}, indent=2) + "\n",
         }
         for path, content in defaults.items():
@@ -84,9 +87,9 @@ class MarkdownMemoryStore:
             )
 
         if self._is_effectively_empty(self.read_text(self.history_md)):
-            legacy_history = self._read_legacy_history()
-            if legacy_history:
-                self.write_text(self.history_md, legacy_history)
+            previous_history = self._read_previous_history_sources()
+            if previous_history:
+                self.write_text(self.history_md, previous_history)
 
     def read_text(self, path: Path) -> str:
         return path.read_text(encoding="utf-8") if path.exists() else ""
@@ -140,18 +143,6 @@ class MarkdownMemoryStore:
         self.write_text(self.memory_md, memory_content)
         self.write_text(self.self_md, self_content)
         self.write_text(self.profile_md, self_content)
-
-    def render_pending_memories(self, items: list[MemoryItem]) -> None:
-        pending_items = sorted(
-            (item for item in items if item.status == "pending"),
-            key=lambda item: (-item.importance, item.type, item.text.lower(), item.id),
-        )
-        lines = [self._pending_header(), "## Candidate Long-Term Memories\n"]
-        if pending_items:
-            lines.extend(self._format_memory_line(item) for item in pending_items)
-        else:
-            lines.append("- None\n")
-        self.write_text(self.pending_md, "".join(lines) + "\n")
 
     def write_recent_context(self, summary: str) -> None:
         sections = self.parse_recent_context(self.read_text(self.recent_context_md))
@@ -259,6 +250,21 @@ class MarkdownMemoryStore:
         if clean_tag == "correction" or metadata.get("correction"):
             meta_parts.append("correction: true")
             meta_parts.append("requires_review: true")
+        extra_metadata = {
+            str(key): value
+            for key, value in metadata.items()
+            if key not in {"correction", "requires_review"}
+        }
+        if extra_metadata:
+            meta_parts.append(
+                "metadata: "
+                + json.dumps(
+                    extra_metadata,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         comment = f" <!-- {' '.join(meta_parts)} -->" if meta_parts else ""
         self.append_text(self.pending_md, f"- [{clean_tag}] {clean_content}{comment}\n")
         return True
@@ -274,16 +280,55 @@ class MarkdownMemoryStore:
 
     def parse_pending_candidates(self) -> list[dict[str, object]]:
         candidates: list[dict[str, object]] = []
+        section = "candidates"
         for raw_line in self.read_text(self.pending_md).splitlines():
             line = raw_line.strip()
+            if line.startswith("## "):
+                section_title = line[3:].strip().lower()
+                if "requires review" in section_title:
+                    section = "requires_review"
+                elif "archive" in section_title:
+                    section = "processed_archive"
+                else:
+                    section = "candidates"
+                continue
+            if section == "processed_archive" or line.startswith("- archived "):
+                continue
             if not line.startswith("- [") or "]" not in line:
                 continue
             tag, rest = line[3:].split("]", 1)
-            content = rest.strip()
-            if "<!--" in content:
-                content = content.split("<!--", 1)[0].strip()
+            content, metadata = self._split_pending_content_and_metadata(rest)
             if content:
-                candidates.append({"tag": tag.strip(), "content": content})
+                metadata_dict = _coerce_metadata_dict(metadata.get("metadata"))
+                for key, value in metadata.items():
+                    if key not in {
+                        "source_ref",
+                        "confidence",
+                        "importance",
+                        "correction",
+                        "requires_review",
+                        "metadata",
+                    }:
+                        metadata_dict.setdefault(key, value)
+                requires_review = section == "requires_review" or _coerce_bool(
+                    metadata.get("requires_review")
+                )
+                correction = tag.strip().lower() == "correction" or _coerce_bool(
+                    metadata.get("correction")
+                )
+                candidates.append(
+                    {
+                        "tag": tag.strip().lower(),
+                        "content": content,
+                        "source_ref": str(metadata.get("source_ref") or ""),
+                        "confidence": _coerce_optional_float(metadata.get("confidence")),
+                        "importance": _coerce_optional_float(metadata.get("importance")),
+                        "correction": correction,
+                        "requires_review": requires_review or correction,
+                        "metadata": metadata_dict,
+                        "section": section,
+                    }
+                )
         return candidates
 
     def snapshot_pending(self) -> Path:
@@ -291,6 +336,57 @@ class MarkdownMemoryStore:
         if self.pending_md.exists():
             shutil.copyfile(self.pending_md, snapshot)
         return snapshot
+
+    def restore_pending_snapshot(self) -> bool:
+        snapshot = self.pending_md.with_suffix(self.pending_md.suffix + ".bak")
+        if not snapshot.exists():
+            return False
+        self.pending_md.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(snapshot, self.pending_md)
+        return True
+
+    def clear_pending_snapshot(self) -> None:
+        snapshot = self.pending_md.with_suffix(self.pending_md.suffix + ".bak")
+        if snapshot.exists():
+            snapshot.unlink()
+
+    def rewrite_pending_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        *,
+        archived: list[dict[str, object]] | None = None,
+    ) -> None:
+        ordinary = [
+            candidate
+            for candidate in candidates
+            if not _coerce_bool(candidate.get("requires_review"))
+            and str(candidate.get("section", "")) != "processed_archive"
+        ]
+        requires_review = [
+            candidate
+            for candidate in candidates
+            if _coerce_bool(candidate.get("requires_review"))
+            and str(candidate.get("section", "")) != "processed_archive"
+        ]
+        existing_archive = self._read_processed_archive_lines()
+        new_archive = [
+            self._format_pending_candidate(candidate, archived=True)
+            for candidate in (archived or [])
+        ]
+
+        lines = [self._pending_header(), "## Candidate Long-Term Memories\n"]
+        if ordinary:
+            lines.extend(self._format_pending_candidate(candidate) for candidate in ordinary)
+        else:
+            lines.append("- None\n")
+        if requires_review:
+            lines.append("\n## Requires Review\n")
+            lines.extend(self._format_pending_candidate(candidate) for candidate in requires_review)
+        archive_lines = existing_archive + new_archive
+        if archive_lines:
+            lines.append("\n## Processed Archive\n")
+            lines.extend(archive_lines)
+        self.write_text(self.pending_md, "".join(lines).rstrip() + "\n")
 
     def has_processed_source_ref(self, source_ref: str) -> bool:
         clean = source_ref.strip()
@@ -368,19 +464,13 @@ class MarkdownMemoryStore:
             cleaned = ["- No notable events."]
         self.append_history("\n".join(cleaned), now=now, title=title)
 
-    def sync_from_legacy(
-        self,
-        items: list[MemoryItem],
-        pending_items: list[MemoryItem],
-        *,
-        force: bool = False,
-    ) -> None:
-        if force or self._is_effectively_empty(self.read_text(self.memory_md)):
+    def sync_active_from_index(self, items: list[MemoryItem], *, force: bool = False) -> None:
+        if (
+            force
+            or self._is_effectively_empty(self.read_text(self.memory_md))
+            or self._is_effectively_empty(self.read_profile())
+        ):
             self.render_active_memories(items)
-        if force or self._is_effectively_empty(self.read_profile()):
-            self.render_active_memories(items)
-        if force or self._is_effectively_empty(self.read_text(self.pending_md)):
-            self.render_pending_memories(pending_items)
         if force:
             self.write_text(
                 self.recent_context_md,
@@ -466,7 +556,7 @@ class MarkdownMemoryStore:
             recent_turns=sections["recent_turns"],
         )
 
-    def _read_legacy_history(self) -> str:
+    def _read_previous_history_sources(self) -> str:
         sections: list[str] = []
         reflections = self.read_text(self.reflections_md).strip()
         if reflections and not self._is_effectively_empty(reflections):
@@ -500,12 +590,72 @@ class MarkdownMemoryStore:
             f"({', '.join(meta)})\n"
         )
 
+    def _format_pending_candidate(
+        self,
+        candidate: dict[str, object],
+        *,
+        archived: bool = False,
+    ) -> str:
+        tag = str(candidate.get("tag") or "requested_memory").strip().lower()
+        content = str(candidate.get("content") or "").strip()
+        meta_parts: list[str] = []
+        source_ref = str(candidate.get("source_ref") or "").strip()
+        if source_ref:
+            meta_parts.append(f"source_ref: {source_ref}")
+        confidence = _coerce_optional_float(candidate.get("confidence"))
+        if confidence is not None:
+            meta_parts.append(f"confidence: {confidence:.2f}")
+        importance = _coerce_optional_float(candidate.get("importance"))
+        if importance is not None:
+            meta_parts.append(f"importance: {importance:.2f}")
+        if _coerce_bool(candidate.get("correction")):
+            meta_parts.append("correction: true")
+        if _coerce_bool(candidate.get("requires_review")):
+            meta_parts.append("requires_review: true")
+        metadata = _coerce_metadata_dict(candidate.get("metadata"))
+        if metadata:
+            meta_parts.append(
+                "metadata: "
+                + json.dumps(
+                    metadata,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        comment = f" <!-- {' '.join(meta_parts)} -->" if meta_parts else ""
+        prefix = "- archived " if archived else "- "
+        return f"{prefix}[{tag}] {content}{comment}\n"
+
+    def _read_processed_archive_lines(self) -> list[str]:
+        lines: list[str] = []
+        in_archive = False
+        for raw_line in self.read_text(self.pending_md).splitlines():
+            line = raw_line.rstrip()
+            if line.startswith("## "):
+                in_archive = "archive" in line[3:].strip().lower()
+                continue
+            if in_archive and line.strip():
+                lines.append(line + "\n")
+        return lines
+
+    def _split_pending_content_and_metadata(
+        self,
+        raw: str,
+    ) -> tuple[str, dict[str, object]]:
+        text = raw.strip()
+        metadata: dict[str, object] = {}
+        match = re.search(r"<!--(.*?)-->", text)
+        if match:
+            metadata = _parse_pending_metadata(match.group(1))
+            text = (text[: match.start()] + text[match.end() :]).strip()
+        return text, metadata
+
     def _memory_header(self) -> str:
         return (
             "# Memory\n\n"
-            "<!-- Stable long-term memory. TODO: future Optimizer should update this "
-            "low-frequency file; ordinary consolidation should write candidates to "
-            "PENDING.md instead. For compatibility, stable=True writes still render here. -->\n\n"
+            "<!-- Stable long-term memory rendered by the low-frequency MemoryOptimizer. "
+            "Ordinary consolidation writes candidates to PENDING.md instead. -->\n\n"
         )
 
     def _self_header(self) -> str:
@@ -570,3 +720,58 @@ class MarkdownMemoryStore:
     @staticmethod
     def _normalize_content(content: str) -> str:
         return " ".join(content.strip().lower().split())
+
+
+def _parse_pending_metadata(comment: str) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for match in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*:\s*|$)", comment.strip()):
+        key = match.group(1).strip()
+        value = match.group(2).strip()
+        if not key:
+            continue
+        if key == "metadata":
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = {}
+            metadata[key] = parsed if isinstance(parsed, dict) else {}
+            continue
+        if key in {"confidence", "importance"}:
+            coerced = _coerce_optional_float(value)
+            if coerced is not None:
+                metadata[key] = coerced
+            continue
+        if key in {"correction", "requires_review"}:
+            metadata[key] = _coerce_bool(value)
+            continue
+        metadata[key] = value
+    return metadata
+
+
+def _coerce_optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_metadata_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}

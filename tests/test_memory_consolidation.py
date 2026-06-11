@@ -1,137 +1,24 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from bootstrap.config import MemoryConfig
+from memory.consolidator import MemoryConsolidator
+from memory.engine import MemoryMutation
 from memory.markdown_store import MarkdownMemoryStore
 from memory.models import MemoryItem
 from memory.runtime import MemoryRuntime
 
 
-@pytest.mark.asyncio
-async def test_consolidation_renders_markdown_outputs_and_keeps_legacy_index(tmp_path) -> None:
-    runtime = MemoryRuntime(tmp_path, MemoryConfig())
-    await runtime.initialize()
-    await runtime.update_recent_context("Working on the memory markdown refactor.")
-    await runtime.append_pending_memory(
-        MemoryItem(type="project", text="Refactor Collie-agent memory outputs", tags=["memory"])
+def test_legacy_mode_is_removed_from_config_and_example() -> None:
+    assert not hasattr(MemoryConfig(), "consolidation_mode")
+    assert not hasattr(MemoryConsolidator, "_consolidate_legacy")
+    assert "consolidation_mode" not in Path("config.example.toml").read_text(
+        encoding="utf-8"
     )
-    await runtime.append_pending_memory(
-        MemoryItem(type="preference", text="User prefers concise answers", tags=["style"])
-    )
-    await runtime.append_pending_memory(
-        MemoryItem(type="fact", text="User uses Python", tags=["dev"])
-    )
-
-    result = await runtime.consolidate()
-
-    assert result.added == 3
-    assert (await runtime.stats())["active"] == 3
-
-    memory_md = runtime.engine.markdown_store.memory_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-    self_md = runtime.engine.markdown_store.self_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-    history_md = runtime.engine.markdown_store.history_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-    recent_context_md = runtime.engine.markdown_store.recent_context_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-    pending_md = runtime.engine.markdown_store.pending_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-    profile_md = runtime.store.profile_md.read_text(encoding="utf-8")
-    index_data = json.loads(runtime.store.index_json.read_text(encoding="utf-8"))
-
-    assert "Refactor Collie-agent memory outputs" in memory_md
-    assert "User prefers concise answers" in memory_md
-    assert "User uses Python" in memory_md
-
-    assert "Refactor Collie-agent memory outputs" in self_md
-    assert "User prefers concise answers" in self_md
-    assert "User uses Python" not in self_md
-    assert profile_md == self_md
-
-    assert "# Recent Context" in recent_context_md
-    assert "## Compression" in recent_context_md
-    assert "## Ongoing Threads" in recent_context_md
-    assert "## Recent Turns" in recent_context_md
-    assert "Working on the memory markdown refactor." in recent_context_md
-
-    assert "# Pending" in pending_md
-    assert "- None" in pending_md
-
-    assert "# History" in history_md
-    assert "Memory Consolidation" in history_md
-    assert "Refactor Collie-agent memory outputs" in history_md
-    assert "User prefers concise answers" in history_md
-
-    assert len(index_data) == 3
-    assert {item["text"] for item in index_data} == {
-        "Refactor Collie-agent memory outputs",
-        "User prefers concise answers",
-        "User uses Python",
-    }
-
-
-@pytest.mark.asyncio
-async def test_history_is_appended_instead_of_rewritten_on_consolidate(tmp_path) -> None:
-    runtime = MemoryRuntime(tmp_path, MemoryConfig())
-    await runtime.initialize()
-
-    await runtime.append_pending_memory(MemoryItem(type="project", text="First history item"))
-    await runtime.consolidate()
-    first_history = runtime.engine.markdown_store.history_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-
-    await runtime.append_pending_memory(MemoryItem(type="project", text="Second history item"))
-    await runtime.consolidate()
-    second_history = runtime.engine.markdown_store.history_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
-
-    assert first_history in second_history
-    assert "First history item" in second_history
-    assert "Second history item" in second_history
-    assert second_history.count("### Memory Consolidation") == 2
-
-
-@pytest.mark.asyncio
-async def test_duplicate_memory_is_merged(tmp_path) -> None:
-    runtime = MemoryRuntime(tmp_path, MemoryConfig())
-    await runtime.initialize()
-    await runtime.append_pending_memory(MemoryItem(type="fact", text="User uses Python"))
-    await runtime.consolidate()
-    await runtime.append_pending_memory(MemoryItem(type="fact", text="User uses Python"))
-
-    result = await runtime.consolidate()
-
-    assert result.merged == 1
-    assert (await runtime.stats())["active"] == 1
-
-
-@pytest.mark.asyncio
-async def test_conflict_is_logged(tmp_path) -> None:
-    runtime = MemoryRuntime(tmp_path, MemoryConfig())
-    await runtime.initialize()
-    await runtime.add_memory(
-        MemoryItem(type="preference", text="User likes detailed answers", tags=["style"])
-    )
-    await runtime.append_pending_memory(
-        MemoryItem(type="preference", text="User does not like detailed answers", tags=["style"])
-    )
-
-    result = await runtime.consolidate()
-
-    assert result.conflicts == 1
-    assert "conflict" in runtime.store.consolidation_log_md.read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
-async def test_build_memory_context_does_not_include_history_text(tmp_path) -> None:
-    runtime = MemoryRuntime(tmp_path, MemoryConfig())
-    await runtime.initialize()
-    await runtime.add_memory(MemoryItem(type="project", text="Memory refactor project"))
-    await runtime.update_recent_context("Compression summary for the active workstream.")
-    await runtime.append_reflection("history-only-marker")
-
-    context = await runtime.build_memory_context("memory refactor", [])
-
-    assert "Compression summary for the active workstream." in context
-    assert "Memory refactor project" in context
-    assert "history-only-marker" not in context
 
 
 @pytest.mark.asyncio
@@ -172,10 +59,32 @@ async def test_markdown_store_appends_history_pending_and_preserves_recent_conte
     assert "## Recent Turns" in recent_context_md
 
 
+def test_pending_parser_reads_metadata_without_comment_content(tmp_path) -> None:
+    store = MarkdownMemoryStore(tmp_path / "memory")
+    store.write_text(
+        store.pending_md,
+        (
+            "# Pending\n\n"
+            "- [preference] 用户希望解释代码更详细。 "
+            "<!-- source_ref: turn:abc confidence: 0.80 importance: 0.75 -->\n"
+        ),
+    )
+
+    [candidate] = store.parse_pending_candidates()
+
+    assert candidate["tag"] == "preference"
+    assert candidate["content"] == "用户希望解释代码更详细。"
+    assert candidate["source_ref"] == "turn:abc"
+    assert candidate["confidence"] == 0.8
+    assert candidate["importance"] == 0.75
+    assert candidate["correction"] is False
+    assert candidate["requires_review"] is False
+    assert candidate["metadata"] == {}
+
+
 @pytest.mark.asyncio
-async def test_aka_like_consolidation_writes_buffers_without_refreshing_memory(tmp_path) -> None:
-    config = MemoryConfig(consolidation_mode="aka_like")
-    runtime = MemoryRuntime(tmp_path, config)
+async def test_consolidation_writes_aka_like_buffers_without_refreshing_memory(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
     await runtime.initialize()
     await runtime.append_pending_memory(
         MemoryItem(
@@ -228,3 +137,183 @@ async def test_aka_like_consolidation_writes_buffers_without_refreshing_memory(t
 
     assert second.discarded == 1
     assert pending_again.count("用户希望解释代码时讲得详细一点。") == 1
+
+
+@pytest.mark.asyncio
+async def test_optimizer_converts_pending_to_active_and_renders_markdown(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate(
+        "preference",
+        "用户希望解释代码时讲得详细一点。",
+        source_ref="turn:abc",
+        confidence=0.8,
+        importance=0.75,
+    )
+
+    result = await runtime.optimize_pending()
+
+    index_data = json.loads(runtime.store.index_json.read_text(encoding="utf-8"))
+    memory_md = store.memory_md.read_text(encoding="utf-8")
+    self_md = store.self_md.read_text(encoding="utf-8")
+    pending_md = store.pending_md.read_text(encoding="utf-8")
+
+    assert result.added == 1
+    assert index_data[0]["status"] == "active"
+    assert index_data[0]["type"] == "preference"
+    assert index_data[0]["source_ref"] == "turn:abc"
+    assert "用户希望解释代码时讲得详细一点。" in memory_md
+    assert "用户希望解释代码时讲得详细一点。" in self_md
+    assert "- [preference] 用户希望解释代码时讲得详细一点。" not in pending_md
+    assert "- archived [preference] 用户希望解释代码时讲得详细一点。" in pending_md
+
+
+@pytest.mark.asyncio
+async def test_optimizer_merges_duplicate_normalized_text(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    existing = MemoryItem(
+        type="preference",
+        text="User likes detailed code explanations",
+        tags=["style"],
+        importance=0.4,
+        confidence=0.4,
+        source_ref="turn:old",
+    )
+    runtime.store.write_index([existing])
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate(
+        "preference",
+        "  user   likes detailed code explanations  ",
+        source_ref="turn:new",
+        confidence=0.9,
+        importance=0.8,
+    )
+
+    result = await runtime.optimize_pending()
+
+    index = runtime.store.read_index()
+    assert result.merged == 1
+    assert len(index) == 1
+    assert index[0].importance == 0.8
+    assert index[0].confidence == 0.9
+    assert index[0].metadata["source_refs"] == ["turn:new", "turn:old"]
+
+
+@pytest.mark.asyncio
+async def test_correction_requires_review_and_does_not_become_active(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate(
+        "correction",
+        "以后不要把这个项目叫成旧名字。",
+        source_ref="turn:correction",
+        confidence=0.9,
+        importance=0.8,
+    )
+
+    result = await runtime.optimize_pending()
+
+    memory_md = store.memory_md.read_text(encoding="utf-8")
+    pending_md = store.pending_md.read_text(encoding="utf-8")
+    assert result.requires_review == 1
+    assert "以后不要把这个项目叫成旧名字。" not in memory_md
+    assert "## Requires Review" in pending_md
+    assert "- [correction] 以后不要把这个项目叫成旧名字。" in pending_md
+
+
+@pytest.mark.asyncio
+async def test_remember_stable_waits_for_optimizer_before_active_write(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+
+    result = await runtime.engine.mutate(
+        MemoryMutation(
+            kind="remember",
+            summary="User wants code explanations to include examples",
+            memory_kind="preference",
+            source_ref="turn:remember",
+            stable=True,
+        )
+    )
+
+    memory_before = runtime.engine.markdown_store.memory_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+    assert result.ok is True
+    assert runtime.store.read_index() == []
+    assert "User wants code explanations to include examples" not in memory_before
+    assert "User wants code explanations to include examples" in runtime.engine.markdown_store.pending_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+
+    optimized = await runtime.optimize_pending()
+
+    assert optimized.added == 1
+    assert runtime.store.read_index()[0].text == "User wants code explanations to include examples"
+    assert "User wants code explanations to include examples" in await runtime.read_core_memory()
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_overwrite_pending_md(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    pending_text = (
+        "# Pending\n\n"
+        "- [preference] xxx <!-- source_ref: turn:abc -->\n"
+    )
+    runtime.engine.markdown_store.write_text(  # type: ignore[attr-defined]
+        runtime.engine.markdown_store.pending_md,  # type: ignore[attr-defined]
+        pending_text,
+    )
+
+    await runtime.engine.mutate(MemoryMutation(kind="sync"))
+
+    assert runtime.engine.markdown_store.pending_md.read_text(encoding="utf-8") == pending_text  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_optimizer_restores_pending_snapshot_on_failure(tmp_path, monkeypatch) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate("preference", "Keep this pending.", source_ref="turn:abc")
+    original = store.pending_md.read_text(encoding="utf-8")
+
+    def fail_rewrite(*args, **kwargs) -> None:
+        store.write_text(store.pending_md, "BROKEN\n")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "rewrite_pending_candidates", fail_rewrite)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await runtime.optimize_pending()
+
+    assert store.pending_md.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_consolidation_restores_pending_snapshot_on_failure(tmp_path, monkeypatch) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate("preference", "Existing candidate.", source_ref="turn:old")
+    original = store.pending_md.read_text(encoding="utf-8")
+    await runtime.append_pending_memory(
+        MemoryItem(
+            type="preference",
+            text="New candidate that fails.",
+            source_ref="turn:new#pending:1",
+            metadata={"batch_source_ref": "turn:new", "tag": "preference"},
+        )
+    )
+
+    def fail_append(*args, **kwargs) -> bool:
+        store.write_text(store.pending_md, "BROKEN\n")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "append_pending_candidate", fail_append)
+
+    result = await runtime.consolidate()
+
+    assert result.conflicts == 1
+    assert store.pending_md.read_text(encoding="utf-8") == original
+    assert runtime.store.read_pending()

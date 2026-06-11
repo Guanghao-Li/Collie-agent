@@ -141,6 +141,23 @@ provider = "echo"
     assert config.llm.fast.fallback_to_main is True
 
 
+def test_legacy_memory_consolidation_mode_is_ignored(tmp_path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[memory]
+consolidation_mode = "legacy"
+optimizer_enabled = true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert not hasattr(config.memory, "consolidation_mode")
+    assert config.memory.optimizer_enabled is True
+
+
 @pytest.mark.asyncio
 async def test_fast_provider_disabled_reuses_main_provider() -> None:
     config = Settings()

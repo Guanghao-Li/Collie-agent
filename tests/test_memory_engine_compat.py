@@ -8,6 +8,15 @@ from memory.models import MemoryItem
 from memory.runtime import MemoryRuntime
 
 
+def _force_active(runtime: MemoryRuntime, item: MemoryItem) -> MemoryItem:
+    item.status = "active"
+    items = [existing for existing in runtime.store.read_index() if existing.id != item.id]
+    items.append(item)
+    runtime.store.write_index(items)
+    runtime.engine.markdown_store.render_active_memories(items)  # type: ignore[attr-defined]
+    return item
+
+
 @pytest.mark.asyncio
 async def test_memory_runtime_initialize_creates_markdown_memory_files(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
@@ -41,13 +50,14 @@ async def test_read_profile_falls_back_to_legacy_profile_md(tmp_path) -> None:
 async def test_engine_query_context_includes_profile_recent_context_and_memories(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
     await runtime.initialize()
-    await runtime.add_memory(
+    _force_active(
+        runtime,
         MemoryItem(
             type="goal",
             text="Finish the Collie-agent memory refactor",
             tags=["collie", "memory"],
             source="test",
-        )
+        ),
     )
     await runtime.update_recent_context("Working on the memory engine phase-one refactor.")
 
@@ -69,14 +79,18 @@ async def test_engine_mutate_remember_and_forget(tmp_path) -> None:
         source="test",
     )
 
-    remember = await runtime.engine.mutate(
-        MemoryMutation(kind="remember", item=item, stable=True)
-    )
+    remember = await runtime.engine.mutate(MemoryMutation(kind="remember", item=item, stable=True))
     assert remember.ok is True
+    assert "User uses Python" not in await runtime.read_core_memory()
+    assert "User uses Python" in runtime.engine.markdown_store.pending_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+
+    await runtime.optimize_pending()
+    active_item = runtime.store.read_index()[0]
+    assert active_item.text == "User uses Python"
     assert "User uses Python" in await runtime.read_core_memory()
 
     forget = await runtime.engine.mutate(
-        MemoryMutation(kind="forget", memory_id=item.id, reason="test forget")
+        MemoryMutation(kind="forget", memory_id=active_item.id, reason="test forget")
     )
     assert forget.ok is True
     assert await runtime.search("Python") == []
@@ -87,13 +101,14 @@ async def test_engine_mutate_remember_and_forget(tmp_path) -> None:
 async def test_legacy_search_and_stats_methods_remain_compatible(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
     await runtime.initialize()
-    await runtime.add_memory(
+    _force_active(
+        runtime,
         MemoryItem(
             type="preference",
             text="User prefers concise answers",
             tags=["style"],
             source="test",
-        )
+        ),
     )
     await runtime.append_pending_memory(
         MemoryItem(
@@ -109,7 +124,13 @@ async def test_legacy_search_and_stats_methods_remain_compatible(tmp_path) -> No
 
     assert results
     assert results[0].text == "User prefers concise answers"
-    assert stats == {"active": 1, "pending": 1, "deleted": 0}
+    assert stats == {
+        "active": 1,
+        "pending": 1,
+        "pending_transient": 1,
+        "pending_candidates": 0,
+        "deleted": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -118,13 +139,14 @@ async def test_vector_disabled_uses_keyword_search_and_keeps_system_working(tmp_
     config.enable_vector_memory = False
     runtime = MemoryRuntime(tmp_path, config)
     await runtime.initialize()
-    await runtime.add_memory(
+    _force_active(
+        runtime,
         MemoryItem(
             type="project",
             text="Refactor the memory engine",
             tags=["memory"],
             source="test",
-        )
+        ),
     )
 
     result = await runtime.engine.query(MemoryQuery(kind="search", text="memory engine"))
@@ -144,13 +166,14 @@ async def test_vector_flag_without_backend_falls_back_to_keyword_search(tmp_path
     config.enable_vector_memory = True
     runtime = MemoryRuntime(tmp_path, config)
     await runtime.initialize()
-    await runtime.add_memory(
+    _force_active(
+        runtime,
         MemoryItem(
             type="fact",
             text="User uses Python for automation",
             tags=["dev"],
             source="test",
-        )
+        ),
     )
 
     result = await runtime.engine.query(MemoryQuery(kind="search", text="Python automation"))
@@ -167,13 +190,14 @@ async def test_vector_flag_without_backend_falls_back_to_keyword_search(tmp_path
 async def test_memory_query_intent_maps_to_legacy_kinds(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
     await runtime.initialize()
-    await runtime.add_memory(
+    _force_active(
+        runtime,
         MemoryItem(
             type="preference",
             text="User prefers detailed code explanations",
             tags=["style"],
             source="test",
-        )
+        ),
     )
 
     legacy = await runtime.engine.query(
@@ -213,14 +237,20 @@ async def test_memory_mutation_accepts_new_remember_and_forget_shapes(tmp_path) 
     assert remember.accepted is True
     assert remember.item_id
     assert remember.actual_kind == "preference"
+    assert remember.status == "pending"
+    assert runtime.store.read_index() == []
+    assert "User wants code explanations to include examples" in runtime.engine.markdown_store.pending_md.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+
+    optimized = await runtime.optimize_pending()
+    active_id = optimized.affected_ids[0]
 
     forget = await runtime.engine.mutate(
-        MemoryMutation(kind="forget", ids=(remember.item_id,), reason="test")
+        MemoryMutation(kind="forget", ids=(active_id,), reason="test")
     )
 
     assert forget.ok is True
     assert forget.accepted is True
-    assert forget.affected_ids == [remember.item_id]
+    assert forget.affected_ids == [active_id]
 
 
 @pytest.mark.asyncio

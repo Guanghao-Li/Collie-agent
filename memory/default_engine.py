@@ -46,10 +46,7 @@ class DefaultMemoryEngine:
         await self.markdown_store.initialize()
         await self.vector_store.initialize()
         index = self.store.read_index()
-        pending_for_markdown = (
-            [] if self.config.consolidation_mode == "aka_like" else self.store.read_pending()
-        )
-        self.markdown_store.sync_from_legacy(index, pending_for_markdown)
+        self.markdown_store.sync_active_from_index(index)
         await self._sync_vector_store(index)
 
     async def query(self, query: MemoryQuery) -> MemoryQueryResult:
@@ -88,10 +85,13 @@ class DefaultMemoryEngine:
             )
         if kind == "stats":
             index = self.store.read_index()
-            pending = self.store.read_pending()
+            transient_pending = self.store.read_pending()
+            pending_candidates = self.markdown_store.parse_pending_candidates()
             stats = {
                 "active": sum(1 for item in index if item.status == "active"),
-                "pending": len(pending),
+                "pending": len(transient_pending) + len(pending_candidates),
+                "pending_transient": len(transient_pending),
+                "pending_candidates": len(pending_candidates),
                 "deleted": sum(1 for item in index if item.status == "deleted"),
             }
             return MemoryQueryResult(metadata={"stats": stats})
@@ -126,7 +126,7 @@ class DefaultMemoryEngine:
                     source=mutation.source_ref or "memory_mutation",
                     source_ref=mutation.source_ref,
                     metadata=dict(mutation.metadata),
-                    status="active" if mutation.stable else "pending",
+                    status="pending",
                 )
             if mutation.item is None:
                 raise ValueError("remember mutation requires an item")
@@ -152,11 +152,7 @@ class DefaultMemoryEngine:
             return MemoryMutationResult(ok=True)
         if mutation.kind == "sync":
             index = self.store.read_index()
-            self.markdown_store.sync_from_legacy(
-                index,
-                self.store.read_pending(),
-                force=True,
-            )
+            self.markdown_store.sync_active_from_index(index, force=True)
             await self._sync_vector_store(index)
             return MemoryMutationResult(ok=True)
         raise ValueError(f"unsupported memory mutation kind: {mutation.kind}")
@@ -186,29 +182,31 @@ class DefaultMemoryEngine:
                 "history": str(self.markdown_store.history_md),
                 "recent_context": str(self.markdown_store.recent_context_md),
                 "pending": str(self.markdown_store.pending_md),
-                "profile_legacy": str(self.store.profile_md),
-                "pending_legacy": str(self.store.pending_jsonl),
-                "index_legacy": str(self.store.index_json),
+                "profile": str(self.store.profile_md),
+                "pending_queue": str(self.store.pending_jsonl),
+                "index": str(self.store.index_json),
             },
         }
 
     async def _remember(self, item: MemoryItem, *, stable: bool) -> MemoryMutationResult:
         now = datetime.now(timezone.utc)
         item.updated_at = now
+        item.status = "pending"
         if stable:
-            item.status = "active"
-            items = self.store.read_index()
-            items = [existing for existing in items if existing.id != item.id]
-            items.append(item)
-            self.store.write_index(items)
-            self.markdown_store.render_active_memories(items)
-        else:
-            item.status = "pending"
-            self.store.append_pending(item)
-            if self.config.consolidation_mode != "aka_like":
-                self.markdown_store.render_pending_memories(self.store.read_pending())
-        if stable:
-            await self.vector_store.upsert(self._to_vector_record(item))
+            item.importance = max(item.importance, 0.75)
+            if item.type == "fact":
+                item.type = "requested_memory"
+            if "requested_memory" not in item.tags and item.type == "requested_memory":
+                item.tags.append("requested_memory")
+        tag = _pending_tag_from_item(item)
+        written = self.markdown_store.append_pending_candidate(
+            tag,
+            item.text,
+            source_ref=item.source_ref or item.source,
+            confidence=item.confidence,
+            importance=item.importance,
+            metadata={**item.metadata, "tags": list(item.tags)},
+        )
         return MemoryMutationResult(
             ok=True,
             item=item,
@@ -216,6 +214,7 @@ class DefaultMemoryEngine:
             item_id=item.id,
             actual_kind=item.type,
             status=item.status,
+            metadata={"pending_written": written, "duplicate": not written},
             items=[item.to_dict()],
         )
 
@@ -397,3 +396,24 @@ def _dedupe_ids(ids: list[str]) -> list[str]:
             seen.add(item_id)
             deduped.append(item_id)
     return deduped
+
+
+def _pending_tag_from_item(item: MemoryItem) -> str:
+    raw = str(item.metadata.get("tag") or "").strip().lower()
+    if raw:
+        return raw
+    if item.type in {
+        "identity",
+        "preference",
+        "key_info",
+        "health_long_term",
+        "requested_memory",
+        "correction",
+        "procedure",
+    }:
+        return item.type
+    if item.type == "instruction":
+        return "procedure"
+    if item.type in {"goal", "project", "habit", "relationship"}:
+        return "preference"
+    return "requested_memory"

@@ -15,9 +15,11 @@ from memory.models import (
     ConsolidationResult,
     MemoryGateDecision,
     MemoryItem,
+    OptimizationResult,
     MemorySearchResult,
     MemorySearchTrace,
 )
+from memory.optimizer import MemoryOptimizer
 from memory.search import MemorySearch
 from memory.store import MemoryStore
 from session.models import SessionMessage
@@ -54,6 +56,11 @@ class MemoryRuntime:
             markdown_store=self.engine.markdown_store,  # type: ignore[attr-defined]
             config=config,
         )
+        self.optimizer = MemoryOptimizer(
+            self.store,
+            self.engine.markdown_store,  # type: ignore[attr-defined]
+            config=config,
+        )
         self.last_search_trace: MemorySearchTrace | None = None
         self._logger = logging.getLogger(__name__)
 
@@ -73,7 +80,8 @@ class MemoryRuntime:
         return result.content
 
     async def append_pending_memory(self, item: MemoryItem) -> None:
-        await self.engine.mutate(MemoryMutation(kind="remember", item=item, stable=False))
+        item.status = "pending"
+        self.store.append_pending(item)
 
     async def add_memory(self, item: MemoryItem) -> None:
         await self.engine.mutate(MemoryMutation(kind="remember", item=item, stable=True))
@@ -250,22 +258,15 @@ class MemoryRuntime:
             assistant_message=assistant_message,
             recent_context=recent_context,
         )
-        if self.config.consolidation_mode != "aka_like":
-            items = [
-                item
-                for item in items
-                if item.metadata.get("extraction_kind") != "history_entry"
-                and "history_entry" not in item.tags
-            ]
         for item in items:
             await self.append_pending_memory(item)
         return items
 
     async def consolidate(self) -> ConsolidationResult:
-        result = await self.consolidator.consolidate()
-        if self.config.consolidation_mode != "aka_like":
-            await self.engine.mutate(MemoryMutation(kind="sync"))
-        return result
+        return await self.consolidator.consolidate()
+
+    async def optimize_pending(self) -> OptimizationResult:
+        return await self.optimizer.optimize()
 
     async def update_recent_context(self, summary: str) -> None:
         await self.engine.mutate(MemoryMutation(kind="replace_recent_context", content=summary))
@@ -298,6 +299,8 @@ class MemoryRuntime:
         return {
             "active": int(stats.get("active", 0)),
             "pending": int(stats.get("pending", 0)),
+            "pending_transient": int(stats.get("pending_transient", 0)),
+            "pending_candidates": int(stats.get("pending_candidates", 0)),
             "deleted": int(stats.get("deleted", 0)),
         }
 

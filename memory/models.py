@@ -98,6 +98,18 @@ class ConsolidationResult:
 
 
 @dataclass(slots=True)
+class OptimizationResult:
+    processed: int = 0
+    added: int = 0
+    merged: int = 0
+    skipped: int = 0
+    requires_review: int = 0
+    archived: int = 0
+    summary: str = ""
+    affected_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class MemoryGateDecision:
     should_search: bool
     reason: str

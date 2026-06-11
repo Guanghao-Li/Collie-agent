@@ -251,9 +251,9 @@ class MemoryExtractor:
 
         if isinstance(data, list):
             return ExtractedMemoryBatch(
-                pending_items=self._parse_legacy_items(data, source_ref=source_ref),
+                pending_items=self._parse_list_items(data, source_ref=source_ref),
                 source_ref=source_ref,
-                raw={"legacy_items": data},
+                raw={"list_items": data},
             )
         if not isinstance(data, dict):
             return ExtractedMemoryBatch(source_ref=source_ref, raw={"unexpected": data})
@@ -310,7 +310,7 @@ class MemoryExtractor:
             raw=data,
         )
 
-    def _parse_legacy_items(
+    def _parse_list_items(
         self,
         entries: list[object],
         *,

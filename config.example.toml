@@ -53,9 +53,14 @@ fallback_to_main = true
 enabled = true
 auto_extract = true
 auto_consolidate = true
-# legacy keeps the existing pending -> active -> MEMORY.md flow.
-# aka_like writes HISTORY.md / PENDING.md / RECENT_CONTEXT.md and leaves MEMORY.md for a future optimizer.
-consolidation_mode = "legacy"
+# Collie-agent now always uses the aka-like memory lifecycle.
+# Consolidation writes HISTORY.md / PENDING.md / RECENT_CONTEXT.md only.
+# The optimizer is the only low-frequency step that updates MEMORY_INDEX.json,
+# MEMORY.md, and SELF.md.
+optimizer_enabled = true
+optimizer_auto_run = false
+optimizer_min_pending = 1
+optimizer_archive_processed = true
 enable_hyde = true
 max_recent_messages = 30
 search_limit = 8

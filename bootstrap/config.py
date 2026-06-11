@@ -74,7 +74,10 @@ class MemoryConfig:
     enabled: bool = True
     auto_extract: bool = True
     auto_consolidate: bool = True
-    consolidation_mode: str = "legacy"
+    optimizer_enabled: bool = True
+    optimizer_auto_run: bool = False
+    optimizer_min_pending: int = 1
+    optimizer_archive_processed: bool = True
     enable_hyde: bool = True
     enable_vector_memory: bool = False
     vector_db_path: str = "memory/vector_memory.db"

@@ -98,7 +98,9 @@ async def test_hyde_text_is_used_in_search_with_trace(tmp_path) -> None:
     fast = FakeProvider("hyde-only-keyword")
     runtime = MemoryRuntime(tmp_path, config, EchoProvider(), fast)
     await runtime.initialize()
-    await runtime.add_memory(MemoryItem(type="fact", text="hyde-only-keyword"))
+    item = MemoryItem(type="fact", text="hyde-only-keyword", status="active")
+    runtime.store.write_index([item])
+    runtime.engine.markdown_store.render_active_memories([item])  # type: ignore[attr-defined]
 
     result = await runtime.search_with_trace("完全不匹配", [])
 
