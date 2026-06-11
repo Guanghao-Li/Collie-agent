@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,29 @@ def test_pending_parser_reads_metadata_without_comment_content(tmp_path) -> None
     assert candidate["metadata"] == {}
 
 
+def test_pending_parser_adds_fallback_source_and_reads_metadata_json(tmp_path) -> None:
+    store = MarkdownMemoryStore(tmp_path / "memory")
+    store.write_text(
+        store.pending_md,
+        (
+            "# Pending\n\n"
+            "- [procedure] Use the project test helper. "
+            "<!-- confidence: 0.70 metadata_json: {\"priority\":\"stable\",\"created_at\":\"2026-01-02T03:04:05+00:00\"} -->\n"
+        ),
+    )
+
+    [candidate] = store.parse_pending_candidates()
+
+    assert candidate["tag"] == "procedure"
+    assert candidate["content"] == "Use the project test helper."
+    assert str(candidate["source_ref"]).startswith("pending:")
+    assert candidate["confidence"] == 0.7
+    assert candidate["metadata"] == {
+        "priority": "stable",
+        "created_at": "2026-01-02T03:04:05+00:00",
+    }
+
+
 @pytest.mark.asyncio
 async def test_consolidation_writes_aka_like_buffers_without_refreshing_memory(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
@@ -151,6 +175,8 @@ async def test_optimizer_converts_pending_to_active_and_renders_markdown(tmp_pat
         confidence=0.8,
         importance=0.75,
     )
+    fixed_now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    runtime.optimizer.now_fn = lambda: fixed_now
 
     result = await runtime.optimize_pending()
 
@@ -160,13 +186,51 @@ async def test_optimizer_converts_pending_to_active_and_renders_markdown(tmp_pat
     pending_md = store.pending_md.read_text(encoding="utf-8")
 
     assert result.added == 1
+    assert result.ok is True
     assert index_data[0]["status"] == "active"
     assert index_data[0]["type"] == "preference"
     assert index_data[0]["source_ref"] == "turn:abc"
+    assert index_data[0]["created_at"] == fixed_now.isoformat()
     assert "用户希望解释代码时讲得详细一点。" in memory_md
     assert "用户希望解释代码时讲得详细一点。" in self_md
     assert "- [preference] 用户希望解释代码时讲得详细一点。" not in pending_md
     assert "- archived [preference] 用户希望解释代码时讲得详细一点。" in pending_md
+
+
+@pytest.mark.asyncio
+async def test_optimizer_dry_run_does_not_consume_pending(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate("preference", "Dry run candidate.", source_ref="turn:dry")
+    before = store.pending_md.read_text(encoding="utf-8")
+
+    result = await runtime.optimize_pending(dry_run=True)
+
+    assert result.ok is True
+    assert result.added == 1
+    assert runtime.store.read_index() == []
+    assert store.pending_md.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_optimizer_auto_run_is_explicitly_configured(tmp_path) -> None:
+    config = MemoryConfig(optimizer_auto_run=True)
+    runtime = MemoryRuntime(tmp_path, config)
+    await runtime.initialize()
+    await runtime.append_pending_memory(
+        MemoryItem(
+            type="preference",
+            text="Auto-run candidate.",
+            source_ref="turn:auto#pending:1",
+            metadata={"batch_source_ref": "turn:auto", "tag": "preference"},
+        )
+    )
+
+    await runtime.consolidate()
+
+    assert runtime.store.read_index()[0].text == "Auto-run candidate."
+    assert "Auto-run candidate." in await runtime.read_core_memory()
 
 
 @pytest.mark.asyncio
@@ -284,9 +348,10 @@ async def test_optimizer_restores_pending_snapshot_on_failure(tmp_path, monkeypa
 
     monkeypatch.setattr(store, "rewrite_pending_candidates", fail_rewrite)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        await runtime.optimize_pending()
+    result = await runtime.optimize_pending()
 
+    assert result.ok is False
+    assert result.errors == ["boom"]
     assert store.pending_md.read_text(encoding="utf-8") == original
 
 

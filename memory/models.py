@@ -99,14 +99,16 @@ class ConsolidationResult:
 
 @dataclass(slots=True)
 class OptimizationResult:
+    ok: bool = True
     processed: int = 0
     added: int = 0
     merged: int = 0
     skipped: int = 0
     requires_review: int = 0
     archived: int = 0
-    summary: str = ""
     affected_ids: list[str] = field(default_factory=list)
+    summary: str = ""
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

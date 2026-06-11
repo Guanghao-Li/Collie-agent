@@ -49,12 +49,18 @@ async def test_memory_plugin_tools_use_optimizer_lifecycle(tmp_path) -> None:
     assert pending_id
     assert runtime.memory_runtime.store.read_index() == []
 
+    dry_run = await runtime.tool_registry.call_tool("optimize_memory", {"dry_run": True})
+    assert dry_run["ok"] is True
+    assert dry_run["added"] == 1
+    assert runtime.memory_runtime.store.read_index() == []
+
     optimized = await runtime.tool_registry.call_tool("optimize_memory", {})
+    assert optimized["ok"] is True
     assert optimized["added"] == 1
 
     recalled = await runtime.tool_registry.call_tool(
         "recall_memory",
-        {"query": "examples code explanations", "intent": "answer", "limit": 3},
+        {"query": "examples code explanations", "intent": "interest", "limit": 3},
     )
     assert recalled["items"]
     active_id = recalled["items"][0]["id"]

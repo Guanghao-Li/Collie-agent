@@ -34,24 +34,27 @@ class MemoryPlugin:
             memory = await context.memory_runtime.read_core_memory()
             return f"{profile.strip()}\n\n{memory.strip()}".strip()
 
-        async def optimize_memory() -> dict[str, object]:
-            result = await context.memory_runtime.optimize_pending()
+        async def optimize_memory(dry_run: bool = False) -> dict[str, object]:
+            result = await context.memory_runtime.optimize_pending(dry_run=dry_run)
             return {
+                "ok": result.ok,
                 "processed": result.processed,
                 "added": result.added,
                 "merged": result.merged,
                 "skipped": result.skipped,
                 "requires_review": result.requires_review,
+                "archived": result.archived,
                 "summary": result.summary,
+                "errors": result.errors,
             }
 
         async def recall_memory(
             query: str,
-            intent: str = "context",
+            intent: str = "answer",
             limit: int = 8,
         ) -> dict[str, object]:
-            allowed_intents = {"answer", "timeline", "procedure", "context"}
-            safe_intent = intent if intent in allowed_intents else "context"
+            allowed_intents = {"answer", "context", "timeline", "procedure", "interest"}
+            safe_intent = intent if intent in allowed_intents else "answer"
             result = await context.memory_runtime.engine.query(
                 MemoryQuery(intent=safe_intent, text=query, limit=limit)  # type: ignore[arg-type]
             )
@@ -110,7 +113,10 @@ class MemoryPlugin:
         context.tool_registry.register(
             "optimize_memory",
             "手动运行低频记忆优化器。",
-            {"type": "object", "properties": {}},
+            {
+                "type": "object",
+                "properties": {"dry_run": {"type": "boolean"}},
+            },
             optimize_memory,
         )
         context.tool_registry.register(
@@ -122,7 +128,7 @@ class MemoryPlugin:
                     "query": {"type": "string"},
                     "intent": {
                         "type": "string",
-                        "enum": ["answer", "timeline", "procedure", "context"],
+                        "enum": ["answer", "context", "timeline", "procedure", "interest"],
                     },
                     "limit": {"type": "integer"},
                 },

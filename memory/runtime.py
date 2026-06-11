@@ -263,10 +263,18 @@ class MemoryRuntime:
         return items
 
     async def consolidate(self) -> ConsolidationResult:
-        return await self.consolidator.consolidate()
+        result = await self.consolidator.consolidate()
+        if getattr(self.config, "optimizer_auto_run", False) and result.conflicts == 0:
+            pending_count = len(
+                self.engine.markdown_store.parse_pending_candidates()  # type: ignore[attr-defined]
+            )
+            min_pending = int(getattr(self.config, "optimizer_min_pending", 1))
+            if pending_count >= min_pending:
+                await self.optimize_pending()
+        return result
 
-    async def optimize_pending(self) -> OptimizationResult:
-        return await self.optimizer.optimize()
+    async def optimize_pending(self, *, dry_run: bool = False) -> OptimizationResult:
+        return await self.optimizer.optimize(dry_run=dry_run)
 
     async def update_recent_context(self, summary: str) -> None:
         await self.engine.mutate(MemoryMutation(kind="replace_recent_context", content=summary))

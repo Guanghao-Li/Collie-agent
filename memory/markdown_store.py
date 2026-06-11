@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -241,8 +242,11 @@ class MarkdownMemoryStore:
         self._remove_pending_none_placeholder()
         metadata = metadata or {}
         meta_parts: list[str] = []
-        if source_ref.strip():
-            meta_parts.append(f"source_ref: {source_ref.strip()}")
+        clean_source_ref = source_ref.strip() or _fallback_pending_source_ref(
+            clean_tag,
+            clean_content,
+        )
+        meta_parts.append(f"source_ref: {clean_source_ref}")
         if confidence is not None:
             meta_parts.append(f"confidence: {float(confidence):.2f}")
         if importance is not None:
@@ -250,14 +254,18 @@ class MarkdownMemoryStore:
         if clean_tag == "correction" or metadata.get("correction"):
             meta_parts.append("correction: true")
             meta_parts.append("requires_review: true")
+        if metadata.get("priority"):
+            meta_parts.append(f"priority: {str(metadata['priority']).strip()}")
+        if metadata.get("created_at"):
+            meta_parts.append(f"created_at: {str(metadata['created_at']).strip()}")
         extra_metadata = {
             str(key): value
             for key, value in metadata.items()
-            if key not in {"correction", "requires_review"}
+            if key not in {"correction", "requires_review", "priority", "created_at"}
         }
         if extra_metadata:
             meta_parts.append(
-                "metadata: "
+                "metadata_json: "
                 + json.dumps(
                     extra_metadata,
                     ensure_ascii=False,
@@ -297,9 +305,12 @@ class MarkdownMemoryStore:
             if not line.startswith("- [") or "]" not in line:
                 continue
             tag, rest = line[3:].split("]", 1)
+            clean_tag = tag.strip().lower()
             content, metadata = self._split_pending_content_and_metadata(rest)
             if content:
-                metadata_dict = _coerce_metadata_dict(metadata.get("metadata"))
+                metadata_dict = _coerce_metadata_dict(
+                    metadata.get("metadata_json", metadata.get("metadata"))
+                )
                 for key, value in metadata.items():
                     if key not in {
                         "source_ref",
@@ -308,19 +319,23 @@ class MarkdownMemoryStore:
                         "correction",
                         "requires_review",
                         "metadata",
+                        "metadata_json",
                     }:
                         metadata_dict.setdefault(key, value)
                 requires_review = section == "requires_review" or _coerce_bool(
                     metadata.get("requires_review")
                 )
-                correction = tag.strip().lower() == "correction" or _coerce_bool(
+                correction = clean_tag == "correction" or _coerce_bool(
                     metadata.get("correction")
                 )
+                source_ref = str(metadata.get("source_ref") or "").strip()
+                if not source_ref:
+                    source_ref = _fallback_pending_source_ref(clean_tag, content)
                 candidates.append(
                     {
-                        "tag": tag.strip().lower(),
+                        "tag": clean_tag,
                         "content": content,
-                        "source_ref": str(metadata.get("source_ref") or ""),
+                        "source_ref": source_ref,
                         "confidence": _coerce_optional_float(metadata.get("confidence")),
                         "importance": _coerce_optional_float(metadata.get("importance")),
                         "correction": correction,
@@ -600,8 +615,9 @@ class MarkdownMemoryStore:
         content = str(candidate.get("content") or "").strip()
         meta_parts: list[str] = []
         source_ref = str(candidate.get("source_ref") or "").strip()
-        if source_ref:
-            meta_parts.append(f"source_ref: {source_ref}")
+        if not source_ref:
+            source_ref = _fallback_pending_source_ref(tag, content)
+        meta_parts.append(f"source_ref: {source_ref}")
         confidence = _coerce_optional_float(candidate.get("confidence"))
         if confidence is not None:
             meta_parts.append(f"confidence: {confidence:.2f}")
@@ -613,9 +629,13 @@ class MarkdownMemoryStore:
         if _coerce_bool(candidate.get("requires_review")):
             meta_parts.append("requires_review: true")
         metadata = _coerce_metadata_dict(candidate.get("metadata"))
+        if metadata.get("priority"):
+            meta_parts.append(f"priority: {str(metadata.pop('priority')).strip()}")
+        if metadata.get("created_at"):
+            meta_parts.append(f"created_at: {str(metadata.pop('created_at')).strip()}")
         if metadata:
             meta_parts.append(
-                "metadata: "
+                "metadata_json: "
                 + json.dumps(
                     metadata,
                     ensure_ascii=False,
@@ -729,7 +749,7 @@ def _parse_pending_metadata(comment: str) -> dict[str, object]:
         value = match.group(2).strip()
         if not key:
             continue
-        if key == "metadata":
+        if key in {"metadata", "metadata_json"}:
             try:
                 parsed = json.loads(value)
             except json.JSONDecodeError:
@@ -775,3 +795,8 @@ def _coerce_metadata_dict(value: object) -> dict[str, object]:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
     return {}
+
+
+def _fallback_pending_source_ref(tag: str, content: str) -> str:
+    digest = hashlib.sha1(f"{tag.strip().lower()}\0{content.strip()}".encode("utf-8")).hexdigest()
+    return f"pending:{digest[:16]}"

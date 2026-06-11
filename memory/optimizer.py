@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 import re
 from typing import Any
@@ -27,12 +28,14 @@ class MemoryOptimizer:
         markdown_store: MarkdownMemoryStore,
         *,
         config: MemoryConfig | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.markdown_store = markdown_store
         self.config = config or MemoryConfig()
+        self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
 
-    async def optimize(self) -> OptimizationResult:
+    async def optimize(self, *, dry_run: bool = False) -> OptimizationResult:
         if not getattr(self.config, "optimizer_enabled", True):
             return OptimizationResult(summary="optimizer disabled")
 
@@ -44,19 +47,56 @@ class MemoryOptimizer:
                 skipped=len(candidates),
                 summary=f"pending candidates below optimizer_min_pending={min_pending}",
             )
+        if dry_run:
+            return self._dry_run_candidates(candidates)
 
         snapshot = self.markdown_store.snapshot_pending()
         try:
             result = self._optimize_candidates(candidates)
             self.markdown_store.clear_pending_snapshot()
             return result
-        except Exception:
+        except Exception as exc:
             if snapshot.exists():
                 self.markdown_store.restore_pending_snapshot()
-            raise
+            return OptimizationResult(
+                ok=False,
+                processed=len(candidates),
+                summary=f"optimization failed: {exc}",
+                errors=[str(exc)],
+            )
+
+    def _dry_run_candidates(self, candidates: list[dict[str, object]]) -> OptimizationResult:
+        active_by_text = {
+            _normalize(item.text): item for item in self.store.read_index() if item.status == "active"
+        }
+        result = OptimizationResult(processed=len(candidates))
+        for candidate in candidates:
+            tag = str(candidate.get("tag") or "").strip().lower()
+            content = str(candidate.get("content") or "").strip()
+            if not tag or not content:
+                result.skipped += 1
+                continue
+            if tag == "correction" or _as_bool(candidate.get("correction")):
+                result.requires_review += 1
+                continue
+            if tag not in AUTO_ACTIVE_TAGS:
+                result.skipped += 1
+                continue
+            duplicate = active_by_text.get(_normalize(content))
+            if duplicate is not None:
+                result.merged += 1
+                result.affected_ids.append(duplicate.id)
+            else:
+                result.added += 1
+        result.summary = (
+            f"dry_run processed={result.processed}, added={result.added}, "
+            f"merged={result.merged}, skipped={result.skipped}, "
+            f"requires_review={result.requires_review}"
+        )
+        return result
 
     def _optimize_candidates(self, candidates: list[dict[str, object]]) -> OptimizationResult:
-        now = datetime.now(timezone.utc)
+        now = self.now_fn()
         index = self.store.read_index()
         active_by_text = {
             _normalize(item.text): item for item in index if item.status == "active"
@@ -147,6 +187,13 @@ class MemoryOptimizer:
             confidence=_candidate_float(candidate, "confidence", default=0.5),
             source="pending:optimizer",
             source_ref=source_ref,
+            happened_at=_candidate_datetime(candidate, "happened_at", metadata),
+            emotional_weight=_candidate_int(
+                candidate,
+                "emotional_weight",
+                metadata,
+                default=0,
+            ),
             metadata=metadata,
             created_at=now,
             updated_at=now,
@@ -198,6 +245,36 @@ def _candidate_float(candidate: dict[str, object], key: str, *, default: float) 
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _candidate_int(
+    candidate: dict[str, object],
+    key: str,
+    metadata: dict[str, Any],
+    *,
+    default: int,
+) -> int:
+    value = candidate.get(key, metadata.get(key))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _candidate_datetime(
+    candidate: dict[str, object],
+    key: str,
+    metadata: dict[str, Any],
+) -> datetime | None:
+    value = candidate.get(key, metadata.get(key))
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _as_bool(value: object) -> bool:
