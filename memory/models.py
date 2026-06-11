@@ -103,6 +103,7 @@ class OptimizationResult:
     processed: int = 0
     added: int = 0
     merged: int = 0
+    superseded: int = 0
     skipped: int = 0
     requires_review: int = 0
     archived: int = 0

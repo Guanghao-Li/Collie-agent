@@ -55,6 +55,10 @@ python main.py test-discord
 pytest
 ```
 
+## Memory dashboard
+
+本地 memory server 启动后，可以打开 `http://127.0.0.1:8765/dashboard` 管理记忆。默认配置里 `[memory.server] enabled = false`，host 是 `127.0.0.1`；如果配置了 `api_key`，在 dashboard 页面输入后会保存在浏览器 localStorage，API 请求仍然走后端校验。
+
 ## 项目结构
 
 ```text

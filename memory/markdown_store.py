@@ -251,8 +251,11 @@ class MarkdownMemoryStore:
             meta_parts.append(f"confidence: {float(confidence):.2f}")
         if importance is not None:
             meta_parts.append(f"importance: {float(importance):.2f}")
-        if clean_tag == "correction" or metadata.get("correction"):
+        correction = clean_tag == "correction" or _coerce_bool(metadata.get("correction"))
+        requires_review = correction or _coerce_bool(metadata.get("requires_review"))
+        if correction:
             meta_parts.append("correction: true")
+        if requires_review:
             meta_parts.append("requires_review: true")
         if metadata.get("priority"):
             meta_parts.append(f"priority: {str(metadata['priority']).strip()}")

@@ -106,6 +106,22 @@ def test_pending_parser_adds_fallback_source_and_reads_metadata_json(tmp_path) -
     }
 
 
+def test_pending_candidate_preserves_requires_review_metadata(tmp_path) -> None:
+    store = MarkdownMemoryStore(tmp_path / "memory")
+
+    assert store.append_pending_candidate(
+        "preference",
+        "Needs a human decision before becoming stable.",
+        source_ref="turn:review",
+        metadata={"requires_review": True},
+    )
+
+    [candidate] = store.parse_pending_candidates()
+    assert candidate["tag"] == "preference"
+    assert candidate["correction"] is False
+    assert candidate["requires_review"] is True
+
+
 @pytest.mark.asyncio
 async def test_consolidation_writes_aka_like_buffers_without_refreshing_memory(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
@@ -289,6 +305,30 @@ async def test_correction_requires_review_and_does_not_become_active(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_optimizer_keeps_requires_review_candidate_pending(tmp_path) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    store.append_pending_candidate(
+        "preference",
+        "Needs a human decision before becoming stable.",
+        source_ref="turn:review",
+        confidence=0.9,
+        importance=0.8,
+        metadata={"requires_review": True},
+    )
+
+    result = await runtime.optimize_pending()
+
+    pending_md = store.pending_md.read_text(encoding="utf-8")
+    assert result.requires_review == 1
+    assert result.added == 0
+    assert runtime.store.read_index() == []
+    assert "## Requires Review" in pending_md
+    assert "- [preference] Needs a human decision before becoming stable." in pending_md
+
+
+@pytest.mark.asyncio
 async def test_remember_stable_waits_for_optimizer_before_active_write(tmp_path) -> None:
     runtime = MemoryRuntime(tmp_path, MemoryConfig())
     await runtime.initialize()
@@ -382,3 +422,54 @@ async def test_consolidation_restores_pending_snapshot_on_failure(tmp_path, monk
     assert result.conflicts == 1
     assert store.pending_md.read_text(encoding="utf-8") == original
     assert runtime.store.read_pending()
+
+
+@pytest.mark.asyncio
+async def test_consolidation_defers_processed_source_refs_until_full_success(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = MemoryRuntime(tmp_path, MemoryConfig())
+    await runtime.initialize()
+    store = runtime.engine.markdown_store  # type: ignore[attr-defined]
+    await runtime.append_pending_memory(
+        MemoryItem(
+            type="preference",
+            text="First candidate survives retry.",
+            source_ref="turn:ok#pending:1",
+            metadata={"batch_source_ref": "turn:ok", "tag": "preference"},
+        )
+    )
+    await runtime.append_pending_memory(
+        MemoryItem(
+            type="preference",
+            text="Second candidate initially fails.",
+            source_ref="turn:fail#pending:1",
+            metadata={"batch_source_ref": "turn:fail", "tag": "preference"},
+        )
+    )
+    original_append = store.append_pending_candidate
+
+    def fail_second_candidate(tag, content, *args, **kwargs) -> bool:
+        if content == "Second candidate initially fails.":
+            raise RuntimeError("boom")
+        return original_append(tag, content, *args, **kwargs)
+
+    monkeypatch.setattr(store, "append_pending_candidate", fail_second_candidate)
+
+    failed = await runtime.consolidate()
+
+    assert failed.conflicts == 1
+    assert not store.has_processed_source_ref("turn:ok")
+    assert runtime.store.read_pending()
+
+    monkeypatch.setattr(store, "append_pending_candidate", original_append)
+
+    retried = await runtime.consolidate()
+    pending_md = store.pending_md.read_text(encoding="utf-8")
+
+    assert retried.conflicts == 0
+    assert "First candidate survives retry." in pending_md
+    assert "Second candidate initially fails." in pending_md
+    assert store.has_processed_source_ref("turn:ok")
+    assert store.has_processed_source_ref("turn:fail")

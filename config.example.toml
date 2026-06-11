@@ -59,12 +59,55 @@ auto_consolidate = true
 # MEMORY.md, and SELF.md.
 optimizer_enabled = true
 optimizer_auto_run = false
+optimizer_interval_seconds = 64800
 optimizer_min_pending = 1
+optimizer_state_path = ".collie/memory/optimizer_state.json"
 optimizer_archive_processed = true
 enable_hyde = true
+enable_vector_memory = false
+vector_db_path = ".collie/memory/memory2.db"
+vector_top_k = 12
+vector_score_threshold = 0.72
+hybrid_keyword_top_k = 12
+hybrid_rrf_k = 60
+memory_injection_budget_chars = 3500
+procedure_boost = 0.15
+reinforcement_boost = 0.05
+semantic_dedup_threshold = 0.88
+# Optional advanced LLM merge/conflict resolver for optimizer candidates.
+# Disabled by default; when enabled, failures fall back to the rule-based optimizer.
+# Sensitive health/legal/financial/safety memories require review by default.
+llm_merge_enabled = false
+llm_merge_model = ""
+llm_merge_max_candidates = 5
+llm_merge_confidence_threshold = 0.75
+llm_merge_allow_auto_supersede = false
+llm_merge_require_review_for_sensitive = true
+llm_merge_log_path = ".collie/memory/LLM_MERGE_LOG.md"
 max_recent_messages = 30
 search_limit = 8
 workspace_dir = "memory"
+
+[memory.server]
+# Local memory API and dashboard. Disabled by default and bound to localhost
+# unless you explicitly change it. When the server is running, open:
+# http://127.0.0.1:8765/dashboard
+# If api_key is set, enter it in the dashboard page; it is not embedded by
+# the backend.
+enabled = false
+host = "127.0.0.1"
+port = 8765
+api_key = ""
+cors_origins = []
+
+[memory.embedding]
+# Optional OpenAI-compatible embeddings backend. Vector memory is disabled by
+# default, and missing API credentials leave the vector backend disabled with a
+# clear reason instead of failing startup.
+model = "text-embedding-v3"
+api_key = "${DASHSCOPE_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 20
 
 [proactive]
 enabled = true

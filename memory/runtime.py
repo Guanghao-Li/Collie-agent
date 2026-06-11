@@ -21,6 +21,7 @@ from memory.models import (
 )
 from memory.optimizer import MemoryOptimizer
 from memory.search import MemorySearch
+from memory.scheduler import MemoryOptimizerScheduler
 from memory.store import MemoryStore
 from session.models import SessionMessage
 
@@ -60,6 +61,13 @@ class MemoryRuntime:
             self.store,
             self.engine.markdown_store,  # type: ignore[attr-defined]
             config=config,
+            memory2_store=self.engine.memory2_store,  # type: ignore[attr-defined]
+            vector_store=self.engine.vector_store,  # type: ignore[attr-defined]
+            llm_provider=self.fast_llm_provider or self.main_llm_provider,
+        )
+        self.scheduler = MemoryOptimizerScheduler(
+            config=config,
+            state_path=self._resolve_optimizer_state_path(),
         )
         self.last_search_trace: MemorySearchTrace | None = None
         self._logger = logging.getLogger(__name__)
@@ -268,9 +276,7 @@ class MemoryRuntime:
             pending_count = len(
                 self.engine.markdown_store.parse_pending_candidates()  # type: ignore[attr-defined]
             )
-            min_pending = int(getattr(self.config, "optimizer_min_pending", 1))
-            if pending_count >= min_pending:
-                await self.optimize_pending()
+            await self.scheduler.run_if_due(self.optimizer, pending_count=pending_count)
         return result
 
     async def optimize_pending(self, *, dry_run: bool = False) -> OptimizationResult:
@@ -369,3 +375,9 @@ class MemoryRuntime:
         return "\n".join(
             f"{message.role}: {message.content}" for message in recent_messages[-6:]
         )
+
+    def _resolve_optimizer_state_path(self) -> Path:
+        raw_path = Path(getattr(self.config, "optimizer_state_path", ".collie/memory/optimizer_state.json"))
+        if raw_path.is_absolute():
+            return raw_path
+        return self.workspace / raw_path

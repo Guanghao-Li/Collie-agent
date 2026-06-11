@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Collie Memory Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css">
+  </head>
+  <body>
+    <div id="dashboard-root" class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Memory Dashboard</h1>
+          <div class="status-line" id="serviceStatus">Service status pending</div>
+        </div>
+        <div class="auth-controls" aria-label="API key controls">
+          <span id="authState" class="badge">No API key</span>
+          <input id="apiKeyInput" type="password" autocomplete="off" placeholder="API key">
+          <button id="saveApiKeyButton" type="button">Save key</button>
+          <button id="clearApiKeyButton" type="button" class="secondary">Clear</button>
+        </div>
+      </header>
+
+      <div id="messageBanner" class="message" role="status" aria-live="polite" hidden></div>
+
+      <section class="stats-strip" aria-label="Memory status">
+        <div><span>Vector</span><strong id="vectorState">-</strong></div>
+        <div><span>Admin</span><strong id="adminState">-</strong></div>
+        <div><span>Active</span><strong id="statActive">-</strong></div>
+        <div><span>Pending</span><strong id="statPending">-</strong></div>
+        <div><span>Review</span><strong id="statReview">-</strong></div>
+        <div><span>Deleted</span><strong id="statDeleted">-</strong></div>
+      </section>
+
+      <main class="workspace">
+        <section class="memory-browser" aria-label="Memory list">
+          <div class="section-header">
+            <h2>Memories</h2>
+            <div class="button-row">
+              <button id="refreshButton" type="button">Refresh</button>
+              <button id="batchDeleteButton" type="button" class="danger">Delete selected</button>
+            </div>
+          </div>
+
+          <div class="filters">
+            <label>Status
+              <select id="statusFilter">
+                <option value="active">active</option>
+                <option value="deleted">deleted</option>
+                <option value="superseded">superseded</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label>Kind
+              <input id="kindFilter" type="text" placeholder="preference">
+            </label>
+            <label>Search
+              <input id="queryFilter" type="search" placeholder="query">
+            </label>
+            <label>Limit
+              <input id="limitFilter" type="number" min="1" max="500" value="50">
+            </label>
+          </div>
+
+          <div id="memoryList" class="memory-list" aria-live="polite"></div>
+
+          <div class="pager">
+            <button id="previousPageButton" type="button" class="secondary">Previous</button>
+            <span id="pageState">offset 0</span>
+            <button id="nextPageButton" type="button" class="secondary">Next</button>
+          </div>
+        </section>
+
+        <section class="detail-panel" aria-label="Memory detail">
+          <div class="section-header">
+            <h2>Detail</h2>
+            <div class="button-row">
+              <button id="findSimilarCurrentButton" type="button">Find similar</button>
+              <button id="deleteMemoryButton" type="button" class="danger">Delete</button>
+            </div>
+          </div>
+
+          <dl id="detailSummary" class="detail-summary"></dl>
+
+          <form id="editForm" class="edit-form">
+            <label>Summary
+              <textarea id="summaryInput" rows="3"></textarea>
+            </label>
+            <label>Body
+              <textarea id="bodyInput" rows="4"></textarea>
+            </label>
+            <div class="form-grid">
+              <label>Type
+                <input id="typeInput" type="text">
+              </label>
+              <label>Status
+                <input id="statusInput" type="text">
+              </label>
+              <label>Importance
+                <input id="importanceInput" type="number" min="0" max="1" step="0.01">
+              </label>
+              <label>Confidence
+                <input id="confidenceInput" type="number" min="0" max="1" step="0.01">
+              </label>
+            </div>
+            <label>Tags
+              <input id="tagsInput" type="text" placeholder="comma,separated,tags">
+            </label>
+            <label>Metadata JSON
+              <textarea id="metadataInput" rows="6" spellcheck="false"></textarea>
+            </label>
+            <div class="form-actions">
+              <input id="deleteReasonInput" type="text" placeholder="delete reason">
+              <button id="saveMemoryButton" type="submit">Save</button>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <section class="tools-grid" aria-label="Memory tools">
+        <section class="tool-panel" aria-label="Recall memory">
+          <div class="section-header">
+            <h2>Recall</h2>
+            <button id="recallButton" type="button">Search</button>
+          </div>
+          <div class="form-grid">
+            <label>Query
+              <input id="recallQueryInput" type="search" placeholder="what should memory recall?">
+            </label>
+            <label>Intent
+              <select id="recallIntentInput">
+                <option value="answer">answer</option>
+                <option value="context">context</option>
+                <option value="timeline">timeline</option>
+                <option value="procedure">procedure</option>
+                <option value="interest">interest</option>
+              </select>
+            </label>
+            <label>Kind
+              <input id="recallKindInput" type="text" placeholder="optional">
+            </label>
+            <label>Limit
+              <input id="recallLimitInput" type="number" min="1" max="50" value="8">
+            </label>
+          </div>
+          <pre id="recallTextBlock" class="output-block"></pre>
+          <div id="recallRecords" class="records"></div>
+        </section>
+
+        <section class="tool-panel" aria-label="Memorize pending memory">
+          <div class="section-header">
+            <h2>Memorize</h2>
+            <button id="memorizeButton" type="button">Add pending</button>
+          </div>
+          <label>Summary
+            <textarea id="memorizeSummaryInput" rows="3"></textarea>
+          </label>
+          <div class="form-grid">
+            <label>Kind
+              <input id="memorizeKindInput" type="text" value="preference">
+            </label>
+            <label>Importance
+              <input id="memorizeImportanceInput" type="number" min="0" max="1" step="0.01" value="0.7">
+            </label>
+            <label>Confidence
+              <input id="memorizeConfidenceInput" type="number" min="0" max="1" step="0.01" value="0.8">
+            </label>
+            <label>Source ref
+              <input id="memorizeSourceInput" type="text" placeholder="manual:dashboard">
+            </label>
+          </div>
+          <p class="note">Manual memories are written to pending review first; run optimizer to promote accepted items.</p>
+          <pre id="memorizeResult" class="output-block"></pre>
+        </section>
+
+        <section class="tool-panel" aria-label="Find similar memory">
+          <div class="section-header">
+            <h2>Similar</h2>
+            <button id="findSimilarTextButton" type="button">Find</button>
+          </div>
+          <label>Text
+            <textarea id="similarTextInput" rows="3"></textarea>
+          </label>
+          <label>Limit
+            <input id="similarLimitInput" type="number" min="1" max="50" value="10">
+          </label>
+          <div id="similarResults" class="similar-results"></div>
+        </section>
+
+        <section class="tool-panel" aria-label="Optimizer">
+          <div class="section-header">
+            <h2>Optimizer</h2>
+            <button id="optimizeButton" type="button">Run optimizer</button>
+          </div>
+          <pre id="optimizerResult" class="output-block"></pre>
+          <h3>Scheduler state</h3>
+          <pre id="optimizerState" class="output-block"></pre>
+        </section>
+
+        <section class="tool-panel wide" aria-label="Events">
+          <div class="section-header">
+            <h2>Events</h2>
+            <button id="loadEventsButton" type="button">Load events</button>
+          </div>
+          <div class="form-grid">
+            <label>Start
+              <input id="eventStartInput" type="datetime-local">
+            </label>
+            <label>End
+              <input id="eventEndInput" type="datetime-local">
+            </label>
+            <label>Limit
+              <input id="eventLimitInput" type="number" min="1" max="500" value="100">
+            </label>
+          </div>
+          <div id="eventTimeline" class="event-timeline"></div>
+        </section>
+      </section>
+    </div>
+    <script src="/static/dashboard.js" defer></script>
+  </body>
+</html>

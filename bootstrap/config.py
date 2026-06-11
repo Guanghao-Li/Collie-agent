@@ -76,14 +76,38 @@ class MemoryConfig:
     auto_consolidate: bool = True
     optimizer_enabled: bool = True
     optimizer_auto_run: bool = False
+    optimizer_interval_seconds: int = 64800
     optimizer_min_pending: int = 1
+    optimizer_state_path: str = ".collie/memory/optimizer_state.json"
     optimizer_archive_processed: bool = True
     enable_hyde: bool = True
     enable_vector_memory: bool = False
-    vector_db_path: str = "memory/vector_memory.db"
+    vector_db_path: str = ".collie/memory/memory2.db"
     embedding_model: str = ""
-    vector_score_threshold: float = 0.7
-    vector_top_k: int = 8
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_timeout_seconds: float = 20.0
+    embedding_dimension: int | None = None
+    memory_injection_budget_chars: int = 3500
+    procedure_boost: float = 0.15
+    reinforcement_boost: float = 0.05
+    vector_score_threshold: float = 0.72
+    vector_top_k: int = 12
+    hybrid_keyword_top_k: int = 12
+    hybrid_rrf_k: int = 60
+    semantic_dedup_threshold: float = 0.88
+    llm_merge_enabled: bool = False
+    llm_merge_model: str = ""
+    llm_merge_max_candidates: int = 5
+    llm_merge_confidence_threshold: float = 0.75
+    llm_merge_allow_auto_supersede: bool = False
+    llm_merge_require_review_for_sensitive: bool = True
+    llm_merge_log_path: str = ".collie/memory/LLM_MERGE_LOG.md"
+    memory_server_enabled: bool = False
+    memory_server_host: str = "127.0.0.1"
+    memory_server_port: int = 8765
+    memory_server_api_key: str = ""
+    memory_server_cors_origins: list[str] = field(default_factory=list)
     max_recent_messages: int = 30
     search_limit: int = 8
     workspace_dir: str = "memory"
@@ -240,6 +264,30 @@ def load_config(path: str | Path | None) -> Settings:
         compatible_llm = llm.get("openai", {})
     fast_llm = llm.get("fast", {})
     memory = data.get("memory", {})
+    if isinstance(memory, dict) and isinstance(memory.get("server"), dict):
+        server = memory.get("server", {})
+        memory = dict(memory)
+        for source_key, target_key in {
+            "enabled": "memory_server_enabled",
+            "host": "memory_server_host",
+            "port": "memory_server_port",
+            "api_key": "memory_server_api_key",
+            "cors_origins": "memory_server_cors_origins",
+        }.items():
+            if source_key in server and target_key not in memory:
+                memory[target_key] = server[source_key]
+    if isinstance(memory, dict) and isinstance(memory.get("embedding"), dict):
+        embedding = memory.get("embedding", {})
+        memory = dict(memory)
+        for source_key, target_key in {
+            "model": "embedding_model",
+            "api_key": "embedding_api_key",
+            "base_url": "embedding_base_url",
+            "timeout_seconds": "embedding_timeout_seconds",
+            "dimension": "embedding_dimension",
+        }.items():
+            if source_key in embedding and target_key not in memory:
+                memory[target_key] = embedding[source_key]
     proactive = data.get("proactive", {})
     drift = data.get("drift", {})
     plugins = data.get("plugins", {})

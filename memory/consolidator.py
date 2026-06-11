@@ -43,6 +43,7 @@ class MemoryConsolidator:
 
         had_failure = False
         recent_summaries: list[str] = []
+        processed_source_records: list[tuple[str, int, int]] = []
         for source_ref, items in grouped.items():
             if self.markdown_store.has_processed_source_ref(source_ref):
                 result.discarded += len(items)
@@ -86,12 +87,7 @@ class MemoryConsolidator:
                 self.markdown_store.update_recent_context_sections(
                     compression=_build_recent_context_summary(recent_summaries),
                 )
-                self.markdown_store.record_processed_source_ref(
-                    source_ref,
-                    history_count=history_count,
-                    pending_count=pending_count,
-                    now=now,
-                )
+                processed_source_records.append((source_ref, history_count, pending_count))
                 self.markdown_store.append_consolidation_log(
                     source_ref=source_ref,
                     history_count=history_count,
@@ -119,6 +115,13 @@ class MemoryConsolidator:
         if had_failure:
             self.markdown_store.restore_pending_snapshot()
         else:
+            for source_ref, history_count, pending_count in processed_source_records:
+                self.markdown_store.record_processed_source_ref(
+                    source_ref,
+                    history_count=history_count,
+                    pending_count=pending_count,
+                    now=now,
+                )
             self.store.clear_pending()
             self.markdown_store.clear_pending_snapshot()
 

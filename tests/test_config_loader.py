@@ -158,6 +158,87 @@ optimizer_enabled = true
     assert config.memory.optimizer_enabled is True
 
 
+def test_memory_embedding_nested_config_loads_into_flat_runtime_fields(tmp_path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[memory]
+enable_vector_memory = true
+vector_db_path = ".collie/memory/memory2.db"
+
+[memory.embedding]
+model = "text-embedding-v3"
+api_key = "${DASHSCOPE_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 12
+dimension = 4
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.memory.enable_vector_memory is True
+    assert config.memory.vector_db_path == ".collie/memory/memory2.db"
+    assert config.memory.embedding_model == "text-embedding-v3"
+    assert config.memory.embedding_api_key == ""
+    assert config.memory.embedding_base_url == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert config.memory.embedding_timeout_seconds == 12
+    assert config.memory.embedding_dimension == 4
+
+
+def test_memory_server_nested_config_loads_into_flat_runtime_fields(tmp_path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[memory.server]
+enabled = true
+host = "127.0.0.1"
+port = 8766
+api_key = "${MEMORY_SERVER_API_KEY}"
+cors_origins = ["http://localhost:5173"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.memory.memory_server_enabled is True
+    assert config.memory.memory_server_host == "127.0.0.1"
+    assert config.memory.memory_server_port == 8766
+    assert config.memory.memory_server_api_key == ""
+    assert config.memory.memory_server_cors_origins == ["http://localhost:5173"]
+
+
+def test_memory_llm_merge_config_loads_flat_runtime_fields(tmp_path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[memory]
+llm_merge_enabled = true
+llm_merge_model = "merge-model"
+llm_merge_max_candidates = 3
+llm_merge_confidence_threshold = 0.82
+llm_merge_allow_auto_supersede = true
+llm_merge_require_review_for_sensitive = false
+llm_merge_log_path = ".collie/memory/custom_merge_log.md"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.memory.llm_merge_enabled is True
+    assert config.memory.llm_merge_model == "merge-model"
+    assert config.memory.llm_merge_max_candidates == 3
+    assert config.memory.llm_merge_confidence_threshold == 0.82
+    assert config.memory.llm_merge_allow_auto_supersede is True
+    assert config.memory.llm_merge_require_review_for_sensitive is False
+    assert config.memory.llm_merge_log_path == ".collie/memory/custom_merge_log.md"
+
+
 @pytest.mark.asyncio
 async def test_fast_provider_disabled_reuses_main_provider() -> None:
     config = Settings()
