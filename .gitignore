@@ -6,6 +6,7 @@ config*.toml
 !config.example.toml
 configs/
 workspace/
+private_docs/
 
 # Python caches and test output
 __pycache__/
