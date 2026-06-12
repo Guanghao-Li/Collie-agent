@@ -377,14 +377,17 @@ h3 {
 
 .records,
 .similar-results,
-.event-timeline {
+.event-timeline,
+.trace-list,
+.trace-steps {
   display: grid;
   gap: 8px;
 }
 
 .record-item,
 .similar-item,
-.event-item {
+.event-item,
+.trace-step {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #ffffff;
@@ -406,6 +409,69 @@ h3 {
 }
 
 .record-item summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.trace-list {
+  min-height: 120px;
+}
+
+.trace-row {
+  display: grid;
+  width: 100%;
+  min-height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.trace-row:hover,
+.trace-row.selected {
+  border-color: var(--primary);
+  background: #f8fbff;
+}
+
+.trace-meta {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.3fr) 96px minmax(120px, 1fr) 120px 112px 82px 76px 72px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trace-meta strong,
+.trace-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-preview {
+  margin-top: 5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.trace-detail {
+  display: grid;
+  gap: 10px;
+}
+
+.trace-summary,
+.trace-step-summary {
+  grid-template-columns: 150px 1fr;
+}
+
+.trace-step summary {
   cursor: pointer;
   font-weight: 700;
 }

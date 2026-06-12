@@ -13,4 +13,6 @@ def create_memory_runtime(
     llm_provider: LLMProvider,
     fast_llm_provider: LLMProvider | None = None,
 ) -> MemoryRuntime:
-    return MemoryRuntime(workspace, config.memory, llm_provider, fast_llm_provider)
+    runtime = MemoryRuntime(workspace, config.memory, llm_provider, fast_llm_provider)
+    runtime.trace_config = config.trace
+    return runtime

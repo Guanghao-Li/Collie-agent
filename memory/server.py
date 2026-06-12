@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 import hmac
+import json
 
 from pydantic import BaseModel, Field
 
@@ -253,6 +254,29 @@ def create_memory_app(runtime: MemoryRuntime, config: MemoryConfig):
         scheduler = getattr(runtime, "scheduler", None)
         return scheduler.read_state() if scheduler is not None else {}
 
+    @app.get("/traces", dependencies=[Depends(require_api_key)])
+    async def trace_list(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+        trace_path = _resolve_trace_path(runtime, config)
+        items, skipped = _read_trace_jsonl(trace_path)
+        summaries = [_trace_summary(item) for item in _sort_traces_newest_first(items)]
+        return {
+            "items": summaries[:limit],
+            "limit": limit,
+            "skipped": skipped,
+            "path_exists": trace_path.exists(),
+        }
+
+    @app.get("/traces/{trace_id}", dependencies=[Depends(require_api_key)])
+    async def trace_detail(trace_id: str) -> dict[str, Any]:
+        trace_path = _resolve_trace_path(runtime, config)
+        if not trace_path.exists():
+            raise ApiError(404, "not_found", "Trace file not found")
+        items, _skipped = _read_trace_jsonl(trace_path)
+        for item in items:
+            if str(item.get("trace_id", "")) == trace_id:
+                return {"trace": item}
+        raise ApiError(404, "not_found", "Trace not found")
+
     @app.get("/memory", dependencies=[Depends(require_api_key)])
     async def memory_list(
         kind: str | None = None,
@@ -336,6 +360,68 @@ def _error_payload(code: str, message: str) -> dict[str, object]:
 
 def _dashboard_static_dir() -> Path:
     return Path(__file__).with_name("static")
+
+
+def _resolve_trace_path(runtime: MemoryRuntime, config: MemoryConfig) -> Path:
+    trace_config = getattr(runtime, "trace_config", None) or getattr(config, "trace", None)
+    raw_path = getattr(trace_config, "path", None) or getattr(
+        config,
+        "trace_path",
+        "traces/agent_traces.jsonl",
+    )
+    trace_path = Path(str(raw_path))
+    if trace_path.is_absolute():
+        return trace_path
+    return Path(getattr(runtime, "workspace", Path("."))) / trace_path
+
+
+def _read_trace_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
+    if not path.exists():
+        return [], 0
+    items: list[dict[str, Any]] = []
+    skipped = 0
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            items.append(item)
+    return items, skipped
+
+
+def _sort_traces_newest_first(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        items,
+        key=lambda item: str(item.get("finished_at") or item.get("started_at") or ""),
+        reverse=True,
+    )
+
+
+def _trace_summary(trace: dict[str, Any]) -> dict[str, Any]:
+    steps = trace.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+    return {
+        "trace_id": trace.get("trace_id", ""),
+        "session_id": trace.get("session_id", ""),
+        "started_at": trace.get("started_at"),
+        "finished_at": trace.get("finished_at"),
+        "duration_ms": trace.get("duration_ms"),
+        "intent": trace.get("intent") if isinstance(trace.get("intent"), dict) else None,
+        "finish_reason": trace.get("finish_reason", ""),
+        "step_count": len(steps),
+        "tool_count": sum(1 for step in steps if isinstance(step, dict) and step.get("type") == "tool"),
+        "memory_extracted_count": trace.get("memory_extracted_count", 0),
+        "user_message_preview": trace.get("user_message_preview", ""),
+    }
 
 
 def _result_to_dict(result: Any) -> dict[str, Any]:

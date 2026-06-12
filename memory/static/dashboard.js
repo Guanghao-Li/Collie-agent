@@ -13,6 +13,8 @@ const state = {
   apiKey: "",
   lastStats: null,
   currentItems: [],
+  currentTraces: [],
+  selectedTraceId: "",
   loadingCount: 0,
 };
 
@@ -66,6 +68,15 @@ function formatJson(value) {
   } catch (error) {
     return String(value);
   }
+}
+
+function formatTraceIntent(intent) {
+  if (!intent || typeof intent !== "object") {
+    return "-";
+  }
+  const name = intent.intent || "-";
+  const confidence = intent.confidence === undefined ? "" : ` ${formatNumber(intent.confidence)}`;
+  return `${name}${confidence}`;
 }
 
 function showMessage(message, type = "success") {
@@ -545,6 +556,139 @@ async function loadEvents() {
   }
 }
 
+function readTraceLimit() {
+  return Math.max(1, Math.min(100, Number(byId("traceLimitInput").value) || 20));
+}
+
+async function loadTraces() {
+  const limit = readTraceLimit();
+  const result = await runTask(() => apiFetch(`/traces?limit=${encodeURIComponent(limit)}`));
+  if (!result) {
+    return;
+  }
+  state.currentTraces = result.items || [];
+  renderTraceList(state.currentTraces);
+  if (!state.currentTraces.some((trace) => trace.trace_id === state.selectedTraceId)) {
+    state.selectedTraceId = "";
+    renderTraceDetail(null);
+  }
+}
+
+function renderTraceList(items) {
+  const list = byId("traceList");
+  clearNode(list);
+  if (!items.length) {
+    list.appendChild(createElement("div", "empty", "No traces found."));
+    return;
+  }
+  items.forEach((trace) => {
+    const row = createElement("button", "trace-row");
+    row.type = "button";
+    if (trace.trace_id === state.selectedTraceId) {
+      row.classList.add("selected");
+    }
+
+    const meta = createElement("div", "trace-meta");
+    meta.appendChild(createElement("span", "", trace.finished_at || trace.started_at || "-"));
+    meta.appendChild(createElement("strong", "", shortId(trace.trace_id)));
+    meta.appendChild(createElement("span", "", trace.session_id || "-"));
+    meta.appendChild(createElement("span", "", formatTraceIntent(trace.intent)));
+    meta.appendChild(createElement("span", "", trace.finish_reason || "-"));
+    meta.appendChild(createElement("span", "", `${trace.duration_ms ?? "-"} ms`));
+    meta.appendChild(createElement("span", "", `${trace.step_count ?? 0} steps`));
+    meta.appendChild(createElement("span", "", `${trace.tool_count ?? 0} tools`));
+    row.appendChild(meta);
+    row.appendChild(createElement("div", "trace-preview", trace.user_message_preview || "-"));
+    row.addEventListener("click", () => loadTraceDetail(trace.trace_id));
+    list.appendChild(row);
+  });
+}
+
+async function loadTraceDetail(traceId) {
+  if (!traceId) {
+    return;
+  }
+  const result = await runTask(() => apiFetch(`/traces/${encodeURIComponent(traceId)}`));
+  if (!result || !result.trace) {
+    return;
+  }
+  state.selectedTraceId = traceId;
+  renderTraceList(state.currentTraces);
+  renderTraceDetail(result.trace);
+}
+
+function appendDefinition(summary, label, value) {
+  summary.appendChild(createElement("dt", "", label));
+  summary.appendChild(createElement("dd", "", value === null || value === undefined || value === "" ? "-" : value));
+}
+
+function appendPre(container, label, value) {
+  container.appendChild(createElement("h3", "", label));
+  container.appendChild(createElement("pre", "output-block", value || "-"));
+}
+
+function renderTraceDetail(trace) {
+  const container = byId("traceDetail");
+  clearNode(container);
+  if (!trace) {
+    container.appendChild(createElement("div", "empty", "Select a trace to inspect LLM and tool steps."));
+    return;
+  }
+
+  const summary = createElement("dl", "detail-summary trace-summary");
+  appendDefinition(summary, "Trace ID", trace.trace_id);
+  appendDefinition(summary, "Session", trace.session_id);
+  appendDefinition(summary, "Started", trace.started_at);
+  appendDefinition(summary, "Finished", trace.finished_at);
+  appendDefinition(summary, "Duration", `${trace.duration_ms ?? "-"} ms`);
+  appendDefinition(summary, "Finish reason", trace.finish_reason);
+  appendDefinition(summary, "Intent", formatTraceIntent(trace.intent));
+  appendDefinition(summary, "Memory context", trace.memory_context_chars);
+  appendDefinition(summary, "Prompt messages", trace.prompt_message_count);
+  appendDefinition(summary, "Extracted", trace.memory_extracted_count);
+  appendDefinition(summary, "Error", trace.error);
+  container.appendChild(summary);
+
+  appendPre(container, "User message preview", trace.user_message_preview || "-");
+  appendPre(container, "Intent JSON", formatJson(trace.intent || {}));
+
+  const steps = Array.isArray(trace.steps) ? trace.steps : [];
+  const stepsContainer = createElement("div", "trace-steps");
+  if (!steps.length) {
+    stepsContainer.appendChild(createElement("div", "empty", "No steps recorded."));
+  }
+  steps.forEach((step, index) => {
+    const details = createElement("details", "trace-step");
+    details.open = index === 0;
+    const label = [
+      step.type || "step",
+      `round ${step.round ?? "-"}`,
+      step.tool_name || step.purpose || "",
+      `${step.latency_ms ?? "-"} ms`,
+    ].filter(Boolean).join(" · ");
+    details.appendChild(createElement("summary", "", label));
+
+    const stepSummary = createElement("dl", "detail-summary trace-step-summary");
+    appendDefinition(stepSummary, "Type", step.type);
+    appendDefinition(stepSummary, "Round", step.round);
+    appendDefinition(stepSummary, "Purpose", step.purpose);
+    appendDefinition(stepSummary, "Latency", `${step.latency_ms ?? "-"} ms`);
+    appendDefinition(stepSummary, "Has tool call", step.has_tool_call);
+    appendDefinition(stepSummary, "Tool", step.tool_name);
+    appendDefinition(stepSummary, "Error", step.error);
+    details.appendChild(stepSummary);
+
+    if (step.type === "tool") {
+      appendPre(details, "Arguments", formatJson(step.arguments || {}));
+      appendPre(details, "Result / observation preview", step.result_preview || "-");
+    } else {
+      appendPre(details, "Response preview", step.response_preview || "-");
+    }
+    stepsContainer.appendChild(details);
+  });
+  container.appendChild(stepsContainer);
+}
+
 function saveApiKey() {
   const input = byId("apiKeyInput");
   const value = input.value.trim();
@@ -559,6 +703,7 @@ function saveApiKey() {
   loadStats();
   loadMemories();
   loadOptimizerState();
+  loadTraces();
 }
 
 function clearApiKey() {
@@ -576,6 +721,7 @@ function bindEvents() {
     await loadStats();
     await loadMemories();
     await loadOptimizerState();
+    await loadTraces();
   });
   byId("batchDeleteButton").addEventListener("click", batchDeleteSelected);
   byId("editForm").addEventListener("submit", saveMemory);
@@ -586,6 +732,7 @@ function bindEvents() {
   byId("memorizeButton").addEventListener("click", memorizePending);
   byId("optimizeButton").addEventListener("click", runOptimizer);
   byId("loadEventsButton").addEventListener("click", loadEvents);
+  byId("loadTracesButton").addEventListener("click", loadTraces);
   byId("previousPageButton").addEventListener("click", () => {
     state.filters.offset = Math.max(0, state.filters.offset - state.filters.limit);
     loadMemories();
@@ -615,6 +762,7 @@ async function bootDashboard() {
   await loadStats();
   await loadMemories();
   await loadOptimizerState();
+  await loadTraces();
 }
 
 document.addEventListener("DOMContentLoaded", bootDashboard);

@@ -30,6 +30,10 @@ Trace 用来记录每一轮非显式命令消息在 AgentLoop 中的运行过程
 
 Trace 不记录 hidden chain-of-thought，也不默认保存完整 prompt。用户消息、LLM 输出和工具结果只保存有限长度 preview，默认最大 500 字符。工具参数和结果会先转成 JSON-safe 结构。trace 写入失败只记日志，不影响用户回复流程。
 
+## Dashboard Trace Viewer
+
+Memory Dashboard 在 trace recording 开启时可以查看最近的 agent trace。Dashboard 通过 memory server 的只读 trace API 读取 JSONL 文件，展示最近轮次、finish reason、duration、intent 决策以及 LLM/tool steps。这个 viewer 面向本地调试和 demo，不是完整 observability 平台。
+
 ## Intent 路由提示
 
 `IntentRouter` 的目标是在显式命令未命中后，给 AgentLoop 一个轻量 routing hint。它不会直接执行动作，也不会替代原有 `!` 命令系统；最终回复仍由 Agent 根据用户原始消息和上下文判断。
