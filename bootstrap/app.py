@@ -6,8 +6,10 @@ import asyncio
 import logging
 
 from agent.commands import AgentCommands
+from agent.intent import IntentRouter
 from agent.llm import LLMProvider
 from agent.loop import AgentLoop
+from agent.trace import TraceRecorder
 from bootstrap.background import create_drift_runtime, create_proactive_runtime
 from bootstrap.config import Settings
 from bootstrap.discord import create_discord_channel
@@ -139,6 +141,19 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
         drift_runtime=drift_runtime,
         runtime_state=runtime_state,
     )
+    intent_router = IntentRouter(
+        fast_llm_provider=fast_llm_provider,
+        enabled=config.intent.enabled,
+        llm_fallback_enabled=config.intent.llm_fallback_enabled,
+        fallback_confidence_threshold=config.intent.fallback_confidence_threshold,
+        timeout_seconds=config.intent.timeout_seconds,
+    )
+    trace_recorder = TraceRecorder(
+        workspace=workspace_path,
+        path=config.trace.path,
+        enabled=config.trace.enabled,
+        max_preview_chars=config.trace.max_preview_chars,
+    )
     agent_loop = AgentLoop(
         config=config,
         message_bus=message_bus,
@@ -149,6 +164,8 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
         plugin_manager=plugin_manager,
         llm_provider=llm_provider,
         commands=commands,
+        intent_router=intent_router,
+        trace_recorder=trace_recorder,
         on_user_activity=drift_runtime.touch_user_activity,
     )
     discord_channel = create_discord_channel(config, message_bus)

@@ -142,6 +142,21 @@ class PluginsConfig:
 
 
 @dataclass(slots=True)
+class TraceConfig:
+    enabled: bool = True
+    path: str = "traces/agent_traces.jsonl"
+    max_preview_chars: int = 500
+
+
+@dataclass(slots=True)
+class IntentConfig:
+    enabled: bool = True
+    llm_fallback_enabled: bool = True
+    fallback_confidence_threshold: float = 0.55
+    timeout_seconds: float = 5.0
+
+
+@dataclass(slots=True)
 class Settings:
     app: AppConfig = field(default_factory=AppConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
@@ -150,6 +165,8 @@ class Settings:
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     drift: DriftConfig = field(default_factory=DriftConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    trace: TraceConfig = field(default_factory=TraceConfig)
+    intent: IntentConfig = field(default_factory=IntentConfig)
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -291,6 +308,8 @@ def load_config(path: str | Path | None) -> Settings:
     proactive = data.get("proactive", {})
     drift = data.get("drift", {})
     plugins = data.get("plugins", {})
+    trace = data.get("trace", {})
+    intent = data.get("intent", {})
 
     return Settings(
         app=replace(settings.app, **{k: v for k, v in app.items() if hasattr(settings.app, k)}),
@@ -360,5 +379,13 @@ def load_config(path: str | Path | None) -> Settings:
             enabled=bool(plugins.get("enabled", settings.plugins.enabled)),
             paths=_as_str_list(plugins.get("paths", settings.plugins.paths)),
             strict_plugins=bool(plugins.get("strict_plugins", settings.plugins.strict_plugins)),
+        ),
+        trace=replace(
+            settings.trace,
+            **{k: v for k, v in trace.items() if hasattr(settings.trace, k)},
+        ),
+        intent=replace(
+            settings.intent,
+            **{k: v for k, v in intent.items() if hasattr(settings.intent, k)},
         ),
     )

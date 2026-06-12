@@ -34,6 +34,15 @@ class BeforeTurnEvent(BaseEvent):
 
 
 @dataclass(slots=True)
+class IntentClassifiedEvent(BaseEvent):
+    session_id: str = ""
+    intent: str = ""
+    confidence: float = 0.0
+    route: str = ""
+    entities: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class PromptRenderEvent(BaseEvent):
     session_id: str = ""
     messages: list[dict[str, str]] = field(default_factory=list)

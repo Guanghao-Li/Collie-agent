@@ -130,3 +130,14 @@ max_tasks_per_cycle = 2
 enabled = true
 paths = ["plugins_builtin"]
 strict_plugins = false
+
+[trace]
+enabled = true
+path = "traces/agent_traces.jsonl"
+max_preview_chars = 500
+
+[intent]
+enabled = true
+llm_fallback_enabled = true
+fallback_confidence_threshold = 0.55
+timeout_seconds = 5
