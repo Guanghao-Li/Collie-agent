@@ -4,6 +4,8 @@ import pytest
 
 from bootstrap.app import build_app_runtime
 from bootstrap.config import Settings
+from bus.event_bus import PromptRenderEvent
+from bus.models import InboundMessage
 from memory.models import MemoryItem
 from tools.registry import ToolError
 
@@ -40,6 +42,156 @@ async def test_plugin_manager_loads_builtin_plugins(tmp_path) -> None:
     assert runtime.plugin_manager.context.llm_provider is runtime.llm_provider
     assert runtime.plugin_manager.context.main_llm_provider is runtime.llm_provider
     assert runtime.plugin_manager.context.fast_llm_provider is runtime.fast_llm_provider
+    assert runtime.plugin_manager.context.phase_runner is runtime.phase_runner
+    assert runtime.plugin_manager.context.tool_executor is runtime.tool_executor
+    assert runtime.agent_loop.phase_runner is runtime.phase_runner
+    await runtime.llm_provider.close()
+
+
+@pytest.mark.asyncio
+async def test_plugin_can_register_prompt_render_phase_module(tmp_path) -> None:
+    plugin_root = tmp_path / "plugins"
+    plugin_dir = plugin_root / "example_prompt_plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.py").write_text(
+        '''
+class ExamplePromptPlugin:
+    name = "example_prompt_plugin"
+
+    async def setup(self, context):
+        context.phase_runner.register(ExamplePromptModule())
+
+
+class ExamplePromptModule:
+    name = "example.prompt_inject"
+    phase = "prompt_render"
+    priority = 20
+
+    async def run(self, frame):
+        if "搜索" in frame.content or "查一下" in frame.content:
+            frame.slots["prompt:section_bottom:example_search_hint"] = (
+                "当用户请求查询资料时，优先考虑使用可用搜索工具。"
+            )
+
+
+plugin = ExamplePromptPlugin()
+'''.strip(),
+        encoding="utf-8",
+    )
+    config = Settings()
+    config.plugins.paths = [str(plugin_root)]
+    runtime = build_app_runtime(config, tmp_path)
+    await runtime.memory_runtime.initialize()
+    await runtime.session_manager.initialize()
+    rendered: list[list[dict[str, str]]] = []
+    runtime.event_bus.subscribe(PromptRenderEvent, lambda event: rendered.append(event.messages))
+
+    await runtime.plugin_manager.load_plugins()
+    await runtime.agent_loop.process_message(
+        InboundMessage(channel="discord", session_id="c1", user_id="u1", content="查一下今天的资料")
+    )
+
+    prompt_modules = runtime.phase_runner.modules_for("prompt_render")
+    assert any(getattr(module, "name", "") == "example.prompt_inject" for module in prompt_modules)
+    assert any(
+        message["role"] == "system" and "优先考虑使用可用搜索工具" in message["content"]
+        for message in rendered[0]
+    )
+    await runtime.llm_provider.close()
+
+
+@pytest.mark.asyncio
+async def test_plugin_phase_registration_failure_is_recorded(tmp_path) -> None:
+    plugin_root = tmp_path / "plugins"
+    plugin_dir = plugin_root / "bad_phase_plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.py").write_text(
+        '''
+class BadPhasePlugin:
+    name = "bad_phase_plugin"
+
+    async def setup(self, context):
+        context.phase_runner.register(BadPhaseModule())
+
+
+class BadPhaseModule:
+    name = "bad.phase"
+    phase = "not_a_phase"
+    priority = 1
+
+    async def run(self, frame):
+        return None
+
+
+plugin = BadPhasePlugin()
+'''.strip(),
+        encoding="utf-8",
+    )
+    config = Settings()
+    config.plugins.paths = [str(plugin_root)]
+    runtime = build_app_runtime(config, tmp_path)
+
+    await runtime.plugin_manager.load_plugins()
+
+    assert len(runtime.plugin_manager.errors) == 1
+    assert "bad_phase_plugin" in runtime.plugin_manager.errors[0]
+    await runtime.llm_provider.close()
+
+
+@pytest.mark.asyncio
+async def test_plugin_can_register_tool_pre_hook(tmp_path) -> None:
+    plugin_root = tmp_path / "plugins"
+    plugin_dir = plugin_root / "tool_hook_plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.py").write_text(
+        '''
+from tools.hooks import ToolHookResult
+
+
+class ToolHookPlugin:
+    name = "tool_hook_plugin"
+
+    async def setup(self, context):
+        context.tool_executor.register_pre_hook(CalculatorRewriteHook())
+
+
+class CalculatorRewriteHook:
+    name = "test.calculator_rewrite"
+    priority = 10
+    tool_name = "calculator"
+
+    async def before_tool_call(self, tool_name, arguments, frame):
+        return ToolHookResult(
+            decision="modify",
+            arguments={"expression": "4 + 5"},
+        )
+
+
+plugin = ToolHookPlugin()
+'''.strip(),
+        encoding="utf-8",
+    )
+    config = Settings()
+    config.plugins.paths = [str(plugin_root)]
+    runtime = build_app_runtime(config, tmp_path)
+    await runtime.memory_runtime.initialize()
+    await runtime.session_manager.initialize()
+
+    await runtime.plugin_manager.load_plugins()
+    outbound = await runtime.agent_loop.process_message(
+        InboundMessage(
+            channel="discord",
+            session_id="c1",
+            user_id="u1",
+            content="TOOL:calculator 1 + 1",
+        )
+    )
+
+    assert any(
+        getattr(hook, "name", "") == "test.calculator_rewrite"
+        for hook in runtime.tool_executor.list_pre_hooks()
+    )
+    assert outbound.content == "工具结果：9"
     await runtime.llm_provider.close()
 
 

@@ -9,6 +9,7 @@ from agent.commands import AgentCommands
 from agent.intent import IntentRouter
 from agent.llm import LLMProvider
 from agent.loop import AgentLoop
+from agent.phases import PhaseRunner
 from agent.trace import TraceRecorder
 from bootstrap.background import create_drift_runtime, create_proactive_runtime
 from bootstrap.config import Settings
@@ -26,6 +27,7 @@ from plugins.context import PluginContext
 from plugins.manager import PluginManager
 from proactive.runtime import ProactiveRuntime
 from session.manager import SessionManager
+from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 
 
@@ -42,6 +44,8 @@ class AppRuntime:
     session_manager: SessionManager
     memory_runtime: MemoryRuntime
     tool_registry: ToolRegistry
+    tool_executor: ToolExecutor
+    phase_runner: PhaseRunner
     plugin_manager: PluginManager
     discord_channel: DiscordChannel
     agent_loop: AgentLoop
@@ -98,6 +102,8 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
     session_manager = SessionManager(workspace_path, config.memory.max_recent_messages)
     memory_runtime = create_memory_runtime(workspace_path, config, llm_provider, fast_llm_provider)
     tool_registry = create_tool_registry(config)
+    tool_executor = ToolExecutor(tool_registry)
+    phase_runner = PhaseRunner()
     proactive_runtime = create_proactive_runtime(
         config,
         memory_runtime,
@@ -123,6 +129,8 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
         memory_runtime=memory_runtime,
         proactive_runtime=proactive_runtime,
         drift_runtime=drift_runtime,
+        phase_runner=phase_runner,
+        tool_executor=tool_executor,
         message_bus=message_bus,
         llm_provider=llm_provider,
         main_llm_provider=main_llm_provider,
@@ -161,12 +169,14 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
         session_manager=session_manager,
         memory_runtime=memory_runtime,
         tool_registry=tool_registry,
+        tool_executor=tool_executor,
         plugin_manager=plugin_manager,
         llm_provider=llm_provider,
         commands=commands,
         intent_router=intent_router,
         trace_recorder=trace_recorder,
         on_user_activity=drift_runtime.touch_user_activity,
+        phase_runner=phase_runner,
     )
     discord_channel = create_discord_channel(config, message_bus)
     return AppRuntime(
@@ -181,6 +191,8 @@ def build_app_runtime(config: Settings, workspace: str | Path) -> AppRuntime:
         session_manager=session_manager,
         memory_runtime=memory_runtime,
         tool_registry=tool_registry,
+        tool_executor=tool_executor,
+        phase_runner=phase_runner,
         plugin_manager=plugin_manager,
         discord_channel=discord_channel,
         agent_loop=agent_loop,

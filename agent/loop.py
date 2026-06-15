@@ -5,25 +5,40 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from agent.commands import AgentCommands
+from agent.frame import TurnFrame
 from agent.intent import IntentDecision, IntentRouter
 from agent.llm import LLMProvider
 from agent.models import ToolCall
+from agent.phase_modules import (
+    AfterTurnEventModule,
+    BeforeTurnEventModule,
+    CommandModule,
+    IntentModule,
+    MemoryContextModule,
+    MemoryExtractModule,
+    OutboundModule,
+    PromptRenderModule,
+    ReasonerModule,
+    RecentMessagesModule,
+    ResponseCleanupModule,
+    SessionPersistModule,
+    TraceFinalizeModule,
+    UserActivityModule,
+    _write_trace_if_needed,
+)
+from agent.phases import PhaseName, PhaseRunner
 from agent.prompt import PromptBuilder
+from agent.slots import apply_abort_reply_slot
 from agent.trace import AgentTrace, TraceRecorder
 from bootstrap.config import Settings
 from bus.event_bus import (
     AfterLLMEvent,
-    AfterMemoryExtractEvent,
-    AfterTurnEvent,
     BeforeLLMEvent,
-    BeforeMemoryExtractEvent,
-    BeforeTurnEvent,
     EventBus,
     IntentClassifiedEvent,
-    PromptRenderEvent,
     ToolCallEvent,
 )
 from bus.message_bus import MessageBus
@@ -31,6 +46,7 @@ from bus.models import InboundMessage, OutboundMessage
 from memory.runtime import MemoryRuntime
 from plugins.manager import PluginManager
 from session.manager import SessionManager
+from tools.executor import ToolExecutor
 from tools.registry import ToolError, ToolRegistry
 
 
@@ -43,12 +59,14 @@ class AgentLoop:
         session_manager: SessionManager,
         memory_runtime: MemoryRuntime,
         tool_registry: ToolRegistry,
+        tool_executor: ToolExecutor | None,
         plugin_manager: PluginManager | None,
         llm_provider: LLMProvider,
         commands: AgentCommands,
         intent_router: IntentRouter | None = None,
         trace_recorder: TraceRecorder | None = None,
-        on_user_activity: callable | None = None,
+        on_user_activity: Callable[[], None] | None = None,
+        phase_runner: PhaseRunner | None = None,
     ) -> None:
         self.config = config
         self.message_bus = message_bus
@@ -56,6 +74,7 @@ class AgentLoop:
         self.session_manager = session_manager
         self.memory_runtime = memory_runtime
         self.tool_registry = tool_registry
+        self.tool_executor = tool_executor or ToolExecutor(tool_registry)
         self.plugin_manager = plugin_manager
         self.llm_provider = llm_provider
         self.commands = commands
@@ -63,6 +82,8 @@ class AgentLoop:
         self.trace_recorder = trace_recorder
         self.on_user_activity = on_user_activity
         self.prompt_builder = PromptBuilder(config, tool_registry)
+        self.phase_runner = phase_runner or PhaseRunner()
+        self._register_default_phase_modules(self.phase_runner)
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._logger = logging.getLogger(__name__)
@@ -98,96 +119,60 @@ class AgentLoop:
                     )
                 )
 
+    def _register_default_phase_modules(self, runner: PhaseRunner) -> None:
+        for module in (
+            UserActivityModule(self),
+            CommandModule(self),
+            BeforeTurnEventModule(self),
+            IntentModule(self),
+            RecentMessagesModule(self),
+            MemoryContextModule(self),
+            PromptRenderModule(self),
+            ReasonerModule(self),
+            ResponseCleanupModule(self),
+            SessionPersistModule(self),
+            MemoryExtractModule(self),
+            AfterTurnEventModule(self),
+            OutboundModule(self),
+            TraceFinalizeModule(self),
+        ):
+            runner.register(module)
+
     async def process_message(self, message: InboundMessage) -> OutboundMessage:
-        if self.on_user_activity:
-            self.on_user_activity()
-        content = message.content.strip()
-        command_result = await self.commands.handle(message.session_id, content)
-        if command_result.handled:
-            outbound = OutboundMessage(
-                channel=message.channel,
-                session_id=message.session_id,
-                content=command_result.response,
-            )
-            await self.message_bus.publish_outbound(outbound)
-            return outbound
-        if command_result.replacement_content:
-            content = command_result.replacement_content
-
-        trace = self.trace_recorder.start_trace(message.session_id, content) if self.trace_recorder else None
+        frame = TurnFrame.from_inbound(message)
         try:
-            await self.event_bus.publish(
-                BeforeTurnEvent(session_id=message.session_id, user_message=content)
-            )
-            intent = await self._classify_intent(message.session_id, content)
-            if trace is not None:
-                trace.intent = intent.to_dict()
-
-            recent = self.session_manager.get_messages(
-                message.session_id,
-                limit=self.config.memory.max_recent_messages,
-            )
-            memory_context = await self.memory_runtime.build_memory_context(content, recent)
-            if trace is not None:
-                trace.memory_context_chars = len(memory_context)
-            messages = self.prompt_builder.build(content, recent, memory_context)
-            messages.insert(1, {"role": "system", "content": intent.to_system_hint()})
-            if trace is not None:
-                trace.prompt_message_count = len(messages)
-            await self.event_bus.publish(
-                PromptRenderEvent(session_id=message.session_id, messages=messages)
-            )
-
-            response = await self._complete_with_tools(message.session_id, messages, trace=trace)
-            self.session_manager.append_message(message.session_id, "user", content)
-            self.session_manager.append_message(message.session_id, "assistant", response)
-
-            await self.event_bus.publish(
-                BeforeMemoryExtractEvent(
-                    session_id=message.session_id,
-                    user_message=content,
-                    assistant_message=response,
+            await self._run_phase(PhaseName.BEFORE_TURN, frame)
+            if not frame.abort:
+                await self._run_phase(PhaseName.BEFORE_REASONING, frame)
+            if not frame.abort:
+                await self._run_phase(PhaseName.PROMPT_RENDER, frame)
+            if not frame.abort:
+                await self._run_phase(PhaseName.REASONER, frame)
+            if not frame.abort:
+                await self._run_phase(PhaseName.AFTER_REASONING, frame)
+            await self._run_phase(PhaseName.AFTER_TURN, frame)
+            if frame.outbound is None:
+                content = frame.abort_reply if frame.abort else frame.response
+                frame.outbound = OutboundMessage(
+                    channel=frame.channel,
+                    session_id=frame.session_id,
+                    content=content or "",
                 )
-            )
-            extracted = await self.memory_runtime.extract_from_turn(
-                message.session_id,
-                content,
-                response,
-            )
-            if trace is not None:
-                trace.memory_extracted_count = len(extracted)
-            await self.event_bus.publish(
-                AfterMemoryExtractEvent(
-                    session_id=message.session_id,
-                    extracted_count=len(extracted),
-                )
-            )
-            await self.event_bus.publish(
-                AfterTurnEvent(
-                    session_id=message.session_id,
-                    user_message=content,
-                    assistant_message=response,
-                    metadata={"memory_extracted": True, "intent": intent.intent},
-                )
-            )
-
-            outbound = OutboundMessage(
-                channel=message.channel,
-                session_id=message.session_id,
-                content=response,
-            )
-            await self.message_bus.publish_outbound(outbound)
-            return outbound
+                await self.message_bus.publish_outbound(frame.outbound)
+            return frame.outbound
         except Exception as exc:
-            if trace is not None:
-                trace.finish_reason = "error"
-                trace.error = self.trace_recorder.preview(str(exc)) if self.trace_recorder else str(exc)
+            if frame.trace is not None:
+                frame.trace.finish_reason = "error"
+                frame.trace.error = (
+                    self.trace_recorder.preview(str(exc)) if self.trace_recorder else str(exc)
+                )
             raise
         finally:
-            if trace is not None and self.trace_recorder is not None:
-                if not trace.finish_reason:
-                    trace.finish_reason = "final_answer"
-                self.trace_recorder.write(trace)
+            _write_trace_if_needed(self.trace_recorder, frame)
+
+    async def _run_phase(self, phase: PhaseName, frame: TurnFrame) -> None:
+        await self.phase_runner.run(phase, frame)
+        apply_abort_reply_slot(frame)
 
     async def _classify_intent(self, session_id: str, content: str) -> IntentDecision:
         if self.intent_router is None:
@@ -215,6 +200,7 @@ class AgentLoop:
         messages: list[dict[str, str]],
         max_tool_rounds: int = 3,
         trace: AgentTrace | None = None,
+        frame: TurnFrame | None = None,
     ) -> str:
         response = ""
         for round_index in range(max_tool_rounds + 1):
@@ -245,17 +231,32 @@ class AgentLoop:
             tool_started = time.perf_counter()
             tool_error: str | None = None
             try:
-                result = await self.tool_registry.call_tool(call.name, call.arguments)
+                result = await self.tool_executor.call_tool(
+                    call.name,
+                    call.arguments,
+                    frame=frame,
+                )
             except ToolError as exc:
                 tool_error = str(exc)
                 result = {"error": str(exc)}
+            executed_arguments = (
+                dict(frame.slots.get("tool:last_arguments", call.arguments))
+                if frame is not None
+                else dict(self.tool_executor.last_arguments or call.arguments)
+            )
+            if (
+                isinstance(result, dict)
+                and (result.get("denied") or result.get("requires_confirmation"))
+                and result.get("error")
+            ):
+                tool_error = str(result["error"])
             tool_latency_ms = int((time.perf_counter() - tool_started) * 1000)
             if self.trace_recorder is not None:
                 self.trace_recorder.record_tool_step(
                     trace,
                     round_index=round_index,
                     tool_name=call.name,
-                    arguments=call.arguments,
+                    arguments=executed_arguments,
                     result=result,
                     latency_ms=tool_latency_ms,
                     error=tool_error,
@@ -264,7 +265,7 @@ class AgentLoop:
                 ToolCallEvent(
                     session_id=session_id,
                     tool_name=call.name,
-                    arguments=call.arguments,
+                    arguments=executed_arguments,
                     result=result,
                 )
             )

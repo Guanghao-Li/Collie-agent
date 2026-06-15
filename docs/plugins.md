@@ -97,9 +97,11 @@ PluginManager 加载插件
 | `workspace` | 访问工作区路径 |
 | `event_bus` | 订阅或发布事件 |
 | `tool_registry` | 注册工具 |
+| `tool_executor` | 注册工具执行前 hook |
 | `memory_runtime` | 读写或检索记忆 |
 | `proactive_runtime` | 注册主动候选来源 |
 | `drift_runtime` | 注册空闲任务 |
+| `phase_runner` | 注册 AgentLoop phase module |
 | `message_bus` | 发送 outbound message |
 | `main_llm_provider` | 调主模型 |
 | `fast_llm_provider` | 调轻量模型 |
@@ -118,6 +120,11 @@ PluginManager 加载插件
 - description
 - schema
 - func
+- risk
+- source_type / source_name
+- always_on
+- search_hint
+- requires_confirmation
 
 示例：
 
@@ -137,6 +144,11 @@ class CalculatorPlugin:
                 "required": ["expression"],
             },
             func=self.calculate,
+            risk="read_only",
+            source_type="plugin",
+            source_name=self.name,
+            always_on=True,
+            search_hint="math calculation arithmetic",
         )
 
     async def calculate(self, expression: str):
@@ -153,6 +165,142 @@ class CalculatorPlugin:
 - 避免危险副作用
 - 对外部 API 设置 timeout
 - 写测试覆盖正常路径和错误路径
+
+常用风险标记：
+
+```python
+# 普通只读工具：读取信息、计算、搜索，不改变外部状态。
+context.tool_registry.register(
+    name="search_docs",
+    description="搜索本地文档。",
+    schema={"type": "object", "properties": {"query": {"type": "string"}}},
+    func=search_docs,
+    risk="read_only",
+)
+
+# 写操作工具：改变本地记忆、缓存或工作区内状态。
+context.tool_registry.register(
+    name="save_note",
+    description="保存一条本地笔记。",
+    schema={"type": "object", "properties": {"text": {"type": "string"}}},
+    func=save_note,
+    risk="write",
+)
+
+# 外部副作用工具：会影响外部系统，例如发消息、发邮件、创建 issue。
+context.tool_registry.register(
+    name="send_email",
+    description="发送一封邮件。",
+    schema={"type": "object", "properties": {"to": {"type": "string"}}},
+    func=send_email,
+    risk="external_side_effect",
+)
+
+# 危险操作：删除、覆盖、不可逆动作，默认要求确认。
+context.tool_registry.register(
+    name="delete_memory",
+    description="删除一条记忆。",
+    schema={"type": "object", "properties": {"id": {"type": "string"}}},
+    func=delete_memory,
+    risk="destructive",
+    requires_confirmation=True,
+)
+```
+
+`render_tools_for_prompt()` 当前只渲染 `always_on=True` 的工具，输出格式保持兼容；`always_on=False` 的 deferred/tool-search 流程留给后续实现。
+
+---
+
+## 注册工具 pre-hook
+
+`ToolRegistry` 仍然是工具目录，负责保存工具定义和最终调用工具函数。需要拦截、改写、拒绝或要求确认工具调用时，插件应注册到 `context.tool_executor`。
+
+pre-hook 返回 `None` 或 `ToolHookResult(decision="allow")` 会继续执行；返回 `modify` 会替换本次 arguments；返回 `deny` 会返回错误结果；返回 `confirm` 会返回需要确认的结果，且不会真正调用工具。
+
+```python
+from tools.hooks import ToolHookResult
+
+
+class DangerousToolBlocker:
+    name = "policy.dangerous_tool_blocker"
+    priority = 10
+    tool_name = None
+
+    async def before_tool_call(self, tool_name, arguments, frame):
+        if tool_name in {"delete_memory", "send_email", "filesystem_write"}:
+            return ToolHookResult(
+                decision="confirm",
+                reason=f"{tool_name} is a high-risk tool and requires user confirmation.",
+            )
+        return None
+
+
+class PolicyPlugin:
+    name = "policy_plugin"
+
+    async def setup(self, context):
+        context.tool_executor.register_pre_hook(DangerousToolBlocker())
+
+
+plugin = PolicyPlugin()
+```
+
+被 `deny` 或 `confirm` 的工具调用仍会进入 trace 和 `ToolCallEvent`，便于审计和调试。
+
+---
+
+## 注册 phase module
+
+插件可以通过 `context.phase_runner.register(...)` 挂载到 AgentLoop 的六个 phase：
+
+- `before_turn`
+- `before_reasoning`
+- `prompt_render`
+- `reasoner`
+- `after_reasoning`
+- `after_turn`
+
+第一版 phase runner 只按 `priority` 从小到大排序，不做依赖拓扑排序。插件注册失败会进入 `PluginManager.errors`；当 `strict_plugins = true` 时沿用现有 fail-fast 行为。
+
+示例：在 prompt render 前写入一个额外提示片段，内置 `PromptRenderModule` 会读取 `frame.slots["prompt:section_bottom:*"]` 并注入为 system message。
+
+```python
+class ExamplePromptPlugin:
+    name = "example_prompt_plugin"
+
+    async def setup(self, context):
+        context.phase_runner.register(ExamplePromptModule())
+
+
+class ExamplePromptModule:
+    name = "example.prompt_inject"
+    phase = "prompt_render"
+    priority = 20
+
+    async def run(self, frame):
+        if "搜索" in frame.content or "查一下" in frame.content:
+            frame.slots["prompt:section_bottom:example_search_hint"] = (
+                "当用户请求查询资料时，优先考虑使用可用搜索工具。"
+            )
+
+
+plugin = ExamplePromptPlugin()
+```
+
+phase module 应保持小而明确：优先通过 `frame.slots` 传递扩展数据，避免直接改写已经由其他模块生成的结构，除非这个插件明确拥有该行为。
+
+常用 slot 约定：
+
+| Slot | 作用 |
+|------|------|
+| `prompt:section_top:*` | 按 key 字典序注入到 system prompt 靠前位置，适合高优先级规则 |
+| `prompt:section_bottom:*` | 按 key 字典序注入到 system prompt 靠后位置，适合插件提示和上下文提示 |
+| `reasoning:max_tool_rounds` | 覆盖本轮 tool loop 最大工具轮数 |
+| `session:abort_reply` | 短路后续 phase，并把该内容作为本轮回复 |
+| `memory:skip_extract` | 跳过本轮 memory extraction |
+| `session:skip_persist` | 跳过本轮 session history 持久化 |
+
+`prompt:*` slot 的值会统一转成字符串；插件不需要直接操作 `frame.messages` 才能影响 prompt。
 
 ---
 
