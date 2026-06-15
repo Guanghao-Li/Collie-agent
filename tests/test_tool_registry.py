@@ -16,6 +16,54 @@ async def test_tool_registry_registers_and_calls_async_tool() -> None:
     registry.register("add_one", "Add one.", {"type": "object"}, add_one)
 
     assert await registry.call_tool("add_one", {"value": 2}) == 3
+    tool = registry.list_tools()[0]
+    assert tool.risk == "read_only"
+    assert tool.source_type == "builtin"
+    assert tool.source_name == ""
+    assert tool.always_on is True
+    assert tool.search_hint == ""
+    assert tool.requires_confirmation is False
+
+
+def test_tool_registry_registers_tool_metadata() -> None:
+    registry = ToolRegistry()
+
+    registry.register(
+        "write_file",
+        "Write a file.",
+        {"type": "object"},
+        lambda path, content: None,
+        risk="write",
+        source_type="plugin",
+        source_name="files",
+        always_on=False,
+        search_hint="file writing",
+        requires_confirmation=True,
+    )
+
+    tool = registry.list_tools()[0]
+    assert tool.risk == "write"
+    assert tool.source_type == "plugin"
+    assert tool.source_name == "files"
+    assert tool.always_on is False
+    assert tool.search_hint == "file writing"
+    assert tool.requires_confirmation is True
+    assert registry.list_tools(include_deferred=False) == []
+
+
+def test_tool_registry_prompt_renders_only_always_on_tools_without_format_change() -> None:
+    registry = ToolRegistry()
+
+    registry.register("visible", "Visible tool.", {"type": "object"}, lambda: None)
+    registry.register(
+        "deferred",
+        "Deferred tool.",
+        {"type": "object"},
+        lambda: None,
+        always_on=False,
+    )
+
+    assert registry.render_tools_for_prompt() == "- visible: Visible tool.; schema={\"type\": \"object\"}"
 
 
 @pytest.mark.asyncio

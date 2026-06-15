@@ -23,6 +23,12 @@ class RegisteredTool:
     description: str
     schema: dict[str, Any]
     func: ToolFunc
+    risk: str = "read_only"
+    source_type: str = "builtin"
+    source_name: str = ""
+    always_on: bool = True
+    search_hint: str = ""
+    requires_confirmation: bool = False
 
 
 class ToolRegistry:
@@ -35,8 +41,25 @@ class ToolRegistry:
         description: str,
         schema: dict[str, Any],
         func: ToolFunc,
+        risk: str = "read_only",
+        source_type: str = "builtin",
+        source_name: str = "",
+        always_on: bool = True,
+        search_hint: str = "",
+        requires_confirmation: bool = False,
     ) -> None:
-        self._tools[name] = RegisteredTool(name, description, schema, func)
+        self._tools[name] = RegisteredTool(
+            name=name,
+            description=description,
+            schema=schema,
+            func=func,
+            risk=risk,
+            source_type=source_type,
+            source_name=source_name,
+            always_on=always_on,
+            search_hint=search_hint,
+            requires_confirmation=requires_confirmation,
+        )
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         if name not in self._tools:
@@ -53,12 +76,16 @@ class ToolRegistry:
         except Exception as exc:
             raise ToolError(f"工具 {name} 执行失败：{exc}") from exc
 
-    def list_tools(self) -> list[RegisteredTool]:
-        return sorted(self._tools.values(), key=lambda tool: tool.name)
+    def list_tools(self, include_deferred: bool = True) -> list[RegisteredTool]:
+        tools = self._tools.values() if include_deferred else self.get_visible_tools()
+        return sorted(tools, key=lambda tool: tool.name)
+
+    def get_visible_tools(self) -> list[RegisteredTool]:
+        return [tool for tool in self._tools.values() if tool.always_on]
 
     def render_tools_for_prompt(self) -> str:
         lines = []
-        for tool in self.list_tools():
+        for tool in self.list_tools(include_deferred=False):
             lines.append(
                 f"- {tool.name}: {tool.description}; schema={json.dumps(tool.schema, ensure_ascii=False)}"
             )
